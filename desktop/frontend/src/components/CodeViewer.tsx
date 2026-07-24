@@ -9,6 +9,8 @@ export interface EditorProps {
   sourceSize?: number;
   /** Opt in to the workspace-oriented viewer with line numbers and search. */
   showLineNumbers?: boolean;
+  /** Increment to request that the workspace-oriented viewer opens search. */
+  searchRequestId?: number;
 }
 
 // ── EDITOR SEAM (code) ───────────────────────────────────────────────────────

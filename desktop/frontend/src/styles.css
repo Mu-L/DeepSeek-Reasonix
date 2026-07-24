@@ -4869,7 +4869,7 @@ a[href] {
   line-height: inherit;
 }
 
-/* ── search bar (Ctrl+F) — Codex-style floating popup ─────────────────── */
+/* ── search bar (Ctrl+F) ──────────────────────────────────────────────── */
 .code-search {
   position: absolute;
   top: 42px;
@@ -4917,6 +4917,12 @@ a[href] {
   font-variant-numeric: tabular-nums;
   font-size: var(--font-xs);
   padding: 0 4px;
+}
+.code-search__count--error {
+  max-width: 168px;
+  overflow: hidden;
+  color: var(--danger);
+  text-overflow: ellipsis;
 }
 .code-search__close {
   display: inline-flex;
@@ -9160,6 +9166,19 @@ body > .mermaid-diagram--fullscreen {
   display: flex;
   flex-direction: column;
   min-height: 0;
+}
+.workspace-preview__body--code .code-search {
+  position: static;
+  z-index: var(--z-local-handle);
+  flex: 0 0 auto;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: none;
+  min-width: 0;
+  padding: 5px 8px;
+  border-width: 0 0 1px;
+  border-radius: 0;
+  box-shadow: none;
 }
 .workspace-preview__body .code-block,
 .workspace-preview__body .code {

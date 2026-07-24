@@ -4,71 +4,35 @@ import type { EditorProps } from "../CodeViewer";
 import { highlightToHtml, shouldHighlightSource } from "../../lib/highlight";
 import { useT } from "../../lib/i18n";
 import { CopyButton } from "../CopyButton";
+import {
+  findCodeMatches,
+  MAX_REGEX_PATTERN_LENGTH,
+  MAX_REGEX_SOURCE_LENGTH,
+  MAX_SEARCH_MATCHES,
+  type CodeSearchMatch,
+  type CodeSearchResult,
+  type RegexSearchErrorCode,
+} from "./codeSearch";
+import { startRegexSearch } from "./regexSearchClient";
+
+export { findCodeMatches, MAX_SEARCH_MATCHES } from "./codeSearch";
 
 // Line-numbered code viewer with virtual scroll and viewer-scoped search.
 const VIRTUAL_THRESHOLD = 100;
 const ROW_HEIGHT_ESTIMATE = 22;
 const OVERSCAN = 15;
 const SEARCH_DEBOUNCE_MS = 100;
-const WORD_CHARACTER_RE = /[\p{L}\p{N}_]/u;
-export const MAX_SEARCH_MATCHES = 10_000;
+const EMPTY_SEARCH_RESULT: CodeSearchResult = { matches: [], truncated: false };
 
-export interface CodeSearchMatch {
-  lineIndex: number;
-  start: number;
-  end: number;
-  absoluteStart: number;
-  absoluteEnd: number;
-}
-
-export interface CodeSearchResult {
-  matches: CodeSearchMatch[];
-  truncated: boolean;
-}
-
-export function findCodeMatches(
-  source: string | readonly string[],
-  query: string,
-  caseSensitive = false,
-  wholeWord = false,
-  maxMatches = MAX_SEARCH_MATCHES,
-): CodeSearchResult {
-  if (!query) return { matches: [], truncated: false };
-
-  const matches: CodeSearchMatch[] = [];
-  const lines = typeof source === "string" ? source.split("\n") : source;
-  const pattern = new RegExp(escapeRegex(query), caseSensitive ? "gu" : "giu");
-  let absoluteOffset = 0;
-
-  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
-    const line = lines[lineIndex];
-    pattern.lastIndex = 0;
-    let match: RegExpExecArray | null;
-    while ((match = pattern.exec(line)) !== null) {
-      const start = match.index;
-      const end = start + match[0].length;
-      const startsInsideWord = start > 0 && isWordCharacter(codePointBefore(line, start));
-      const endsInsideWord = end < line.length && isWordCharacter(codePointAt(line, end));
-      if (!wholeWord || (!startsInsideWord && !endsInsideWord)) {
-        if (matches.length >= maxMatches) {
-          return { matches, truncated: true };
-        }
-        matches.push({
-          lineIndex,
-          start,
-          end,
-          absoluteStart: absoluteOffset + start,
-          absoluteEnd: absoluteOffset + end,
-        });
-      }
-      // The query is non-empty, but keep the loop safe if regex behavior ever
-      // changes around an unusual Unicode sequence.
-      if (match[0].length === 0) pattern.lastIndex += 1;
-    }
-    absoluteOffset += line.length + 1;
-  }
-
-  return { matches, truncated: false };
+interface RegexSearchState {
+  source: string;
+  query: string;
+  caseSensitive: boolean;
+  wholeWord: boolean;
+  status: "idle" | "pending" | "ready" | "error";
+  result: CodeSearchResult;
+  error?: RegexSearchErrorCode;
+  detail?: string;
 }
 
 // Insert mark elements into one already-highlighted line. Search offsets stay
@@ -194,6 +158,7 @@ export default function LineNumberCode({
   showLineNumbers,
   maxHeight,
   sourceSize,
+  searchRequestId,
 }: EditorProps) {
   const t = useT();
   const lines = useMemo(() => value.split("\n"), [value]);
@@ -210,14 +175,61 @@ export default function LineNumberCode({
   const [searchQuery, setSearchQuery] = useState("");
   const [caseSensitive, setCaseSensitive] = useState(false);
   const [wholeWord, setWholeWord] = useState(false);
+  const [regexEnabled, setRegexEnabled] = useState(false);
+  const [regexSearchState, setRegexSearchState] = useState<RegexSearchState>({
+    source: value,
+    query: "",
+    caseSensitive: false,
+    wholeWord: false,
+    status: "idle",
+    result: EMPTY_SEARCH_RESULT,
+  });
   const [currentMatchIdx, setCurrentMatchIdx] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const searchTimerRef = useRef<number | null>(null);
+  const regexRequestIdRef = useRef(0);
+  const lastSearchRequestIdRef = useRef(searchRequestId);
 
-  const searchResult = useMemo(
-    () => findCodeMatches(lines, searchQuery, caseSensitive, wholeWord),
-    [lines, searchQuery, caseSensitive, wholeWord],
+  const openSearch = useCallback(() => {
+    setSearchOpen(true);
+    window.setTimeout(() => {
+      inputRef.current?.focus();
+      inputRef.current?.select();
+    }, 0);
+  }, []);
+
+  useEffect(() => {
+    if (searchRequestId === lastSearchRequestIdRef.current) return;
+    lastSearchRequestIdRef.current = searchRequestId;
+    openSearch();
+  }, [openSearch, searchRequestId]);
+
+  const literalSearchResult = useMemo(
+    () => regexEnabled
+      ? EMPTY_SEARCH_RESULT
+      : findCodeMatches(lines, searchQuery, caseSensitive, wholeWord),
+    [caseSensitive, lines, regexEnabled, searchQuery, wholeWord],
   );
+  const regexStateIsCurrent =
+    regexSearchState.source === value
+    && regexSearchState.query === searchQuery
+    && regexSearchState.caseSensitive === caseSensitive
+    && regexSearchState.wholeWord === wholeWord;
+  const regexSearchPending = Boolean(
+    regexEnabled
+    && searchQuery
+    && (!regexStateIsCurrent || regexSearchState.status === "pending"),
+  );
+  const regexSearchError = regexEnabled
+    && regexStateIsCurrent
+    && regexSearchState.status === "error"
+    ? regexSearchState.error
+    : undefined;
+  const searchResult = regexEnabled
+    ? regexStateIsCurrent && regexSearchState.status === "ready"
+      ? regexSearchState.result
+      : EMPTY_SEARCH_RESULT
+    : literalSearchResult;
   const matches = searchResult.matches;
   const totalMatches = matches.length;
   const activeMatchIndex = totalMatches > 0 ? currentMatchIdx % totalMatches : 0;
@@ -234,7 +246,59 @@ export default function LineNumberCode({
     },
     [matches],
   );
-  const searchPending = query !== searchQuery;
+  const searchPending = query !== searchQuery || regexSearchPending;
+
+  useEffect(() => {
+    regexRequestIdRef.current += 1;
+    const requestId = regexRequestIdRef.current;
+    const baseState = {
+      source: value,
+      query: searchQuery,
+      caseSensitive,
+      wholeWord,
+      result: EMPTY_SEARCH_RESULT,
+    };
+
+    if (!regexEnabled || !searchQuery) {
+      setRegexSearchState({ ...baseState, status: "idle" });
+      return;
+    }
+    if (searchQuery.length > MAX_REGEX_PATTERN_LENGTH) {
+      setRegexSearchState({ ...baseState, status: "error", error: "pattern_too_long" });
+      return;
+    }
+    if (value.length > MAX_REGEX_SOURCE_LENGTH) {
+      setRegexSearchState({ ...baseState, status: "error", error: "source_too_large" });
+      return;
+    }
+
+    setRegexSearchState({ ...baseState, status: "pending" });
+    return startRegexSearch(
+      {
+        requestId,
+        source: value,
+        pattern: searchQuery,
+        caseSensitive,
+        wholeWord,
+        maxMatches: MAX_SEARCH_MATCHES,
+      },
+      {
+        onResponse: (response) => {
+          if (response.requestId !== regexRequestIdRef.current) return;
+          if (response.ok) {
+            setRegexSearchState({ ...baseState, status: "ready", result: response.result });
+          } else {
+            setRegexSearchState({
+              ...baseState,
+              status: "error",
+              error: response.error,
+              detail: response.detail,
+            });
+          }
+        },
+      },
+    );
+  }, [caseSensitive, regexEnabled, searchQuery, value, wholeWord]);
 
   useEffect(() => {
     return () => {
@@ -329,8 +393,9 @@ export default function LineNumberCode({
     const lineHtml = lineMatches.length > 0
       ? highlightLineMatches(baseLineHtmls[index] ?? "", lineMatches, activeMatch)
       : baseLineHtmls[index] ?? "";
-    const isCurrent = searchQuery && activeMatch?.lineIndex === index;
-    const isDimmed = searchQuery && !matchesByLine.has(index);
+    const hasSettledSearch = searchQuery && !searchPending && !regexSearchError;
+    const isCurrent = hasSettledSearch && activeMatch?.lineIndex === index;
+    const isDimmed = hasSettledSearch && !matchesByLine.has(index);
     return (
       <div
         key={index}
@@ -355,6 +420,24 @@ export default function LineNumberCode({
   };
 
   const totalMatchLabel = searchResult.truncated ? `${totalMatches}+` : totalMatches;
+  const searchErrorLabel = (() => {
+    switch (regexSearchError) {
+      case "invalid_pattern":
+        return t("workspace.searchRegexInvalid");
+      case "pattern_too_long":
+        return t("workspace.searchRegexTooLong");
+      case "source_too_large":
+        return t("workspace.searchRegexSourceTooLarge");
+      case "zero_length_unsupported":
+        return t("workspace.searchRegexZeroLength");
+      case "timeout":
+        return t("workspace.searchRegexTimeout");
+      case "unavailable":
+        return t("workspace.searchRegexUnavailable");
+      default:
+        return "";
+    }
+  })();
 
   return (
     <div
@@ -363,11 +446,7 @@ export default function LineNumberCode({
         if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f") {
           event.preventDefault();
           event.stopPropagation();
-          setSearchOpen(true);
-          window.setTimeout(() => {
-            inputRef.current?.focus();
-            inputRef.current?.select();
-          }, 0);
+          openSearch();
         } else if (event.key === "Escape" && searchOpen) {
           event.preventDefault();
           event.stopPropagation();
@@ -400,9 +479,15 @@ export default function LineNumberCode({
           />
 
           {query && (
-            <span className="code-search__count">
+            <span
+              className={`code-search__count${searchErrorLabel ? " code-search__count--error" : ""}`}
+              aria-live="polite"
+              title={searchErrorLabel ? regexSearchState.detail || searchErrorLabel : undefined}
+            >
               {searchPending
                 ? t("common.loading")
+                : searchErrorLabel
+                  ? searchErrorLabel
                 : totalMatches > 0
                   ? t("workspace.searchCount", {
                     current: activeMatchIndex + 1,
@@ -437,6 +522,19 @@ export default function LineNumberCode({
             type="button"
           >
             ab
+          </button>
+          <button
+            className={`code-search__toggle${regexEnabled ? " code-search__toggle--on" : ""}`}
+            onClick={() => {
+              setCurrentMatchIdx(0);
+              setRegexEnabled((enabled) => !enabled);
+            }}
+            aria-label={t("workspace.searchRegex")}
+            aria-pressed={regexEnabled}
+            title={t("workspace.searchRegex")}
+            type="button"
+          >
+            .*
           </button>
 
           {query && !searchPending && totalMatches > 0 && (
@@ -518,27 +616,10 @@ export default function LineNumberCode({
   );
 }
 
-function escapeRegex(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
 function escapeHtml(value: string): string {
   return value.replace(/[&<>]/g, (character) => (
     character === "&" ? "&amp;" : character === "<" ? "&lt;" : "&gt;"
   ));
-}
-
-function isWordCharacter(value: string): boolean {
-  return value !== "" && WORD_CHARACTER_RE.test(value);
-}
-
-function codePointBefore(value: string, offset: number): string {
-  const codePoints = Array.from(value.slice(0, offset));
-  return codePoints[codePoints.length - 1] ?? "";
-}
-
-function codePointAt(value: string, offset: number): string {
-  return Array.from(value.slice(offset))[0] ?? "";
 }
 
 function decodedEntityLength(entity: string): number {
