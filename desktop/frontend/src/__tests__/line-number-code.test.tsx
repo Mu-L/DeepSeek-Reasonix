@@ -108,6 +108,17 @@ ok(
   !zeroLengthRegex.ok && zeroLengthRegex.error === "zero_length_unsupported",
   "rejects zero-length regex matches that cannot be highlighted safely",
 );
+const mixedLengthRegex = findRegexCodeMatches(regexRequest({
+  source: "abc",
+  pattern: ".*",
+}));
+ok(
+  mixedLengthRegex.ok
+    && mixedLengthRegex.result.matches.length === 1
+    && mixedLengthRegex.result.matches[0].start === 0
+    && mixedLengthRegex.result.matches[0].end === 3,
+  "keeps non-empty regex results when the expression also produces an empty match",
+);
 const longRegex = findRegexCodeMatches(regexRequest({ pattern: "x".repeat(MAX_REGEX_PATTERN_LENGTH + 1) }));
 ok(!longRegex.ok && longRegex.error === "pattern_too_long", "caps regular-expression length");
 const oversizedRegexSource = findRegexCodeMatches(regexRequest({
@@ -307,6 +318,15 @@ ok(
   container.querySelectorAll(".code-block__wrap")[1].querySelector(".code-search") == null,
   "does not fan the shortcut out to sibling viewers",
 );
+const firstViewer = container.querySelectorAll<HTMLElement>(".code-block__wrap")[0];
+ok(
+  firstViewer.querySelector(".code-block__copy") == null,
+  "removes the covered floating copy control while search is open",
+);
+ok(
+  firstViewer.querySelector('.code-search .code-search__copy[aria-label="Copy"]') != null,
+  "keeps copy available as a visible search-toolbar action",
+);
 
 const searchInput = container.querySelector<HTMLInputElement>(".code-search__input")!;
 await act(async () => {
@@ -388,6 +408,13 @@ ok(
   container.querySelector(".code-search__count--error")?.textContent === "Expression too long",
   "shows a localized error before unsafe regex work starts",
 );
+
+await act(async () => {
+  container.querySelector<HTMLButtonElement>('[aria-label="Close search"]')?.click();
+  await flush();
+});
+ok(firstViewer.querySelector(".code-search") == null, "closes the viewer-scoped search toolbar");
+ok(firstViewer.querySelector(".code-block__copy") != null, "restores the floating copy control after search closes");
 
 await act(async () => root.unmount());
 

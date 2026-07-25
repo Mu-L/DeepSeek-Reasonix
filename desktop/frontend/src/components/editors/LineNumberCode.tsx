@@ -497,78 +497,85 @@ export default function LineNumberCode({
             </span>
           )}
 
-          <button
-            className={`code-search__toggle${caseSensitive ? " code-search__toggle--on" : ""}`}
-            onClick={() => {
-              setCurrentMatchIdx(0);
-              setCaseSensitive((enabled) => !enabled);
-            }}
-            aria-label={t("workspace.searchMatchCase")}
-            aria-pressed={caseSensitive}
-            title={t("workspace.searchMatchCase")}
-            type="button"
-          >
-            Aa
-          </button>
-          <button
-            className={`code-search__toggle${wholeWord ? " code-search__toggle--on" : ""}`}
-            onClick={() => {
-              setCurrentMatchIdx(0);
-              setWholeWord((enabled) => !enabled);
-            }}
-            aria-label={t("workspace.searchWholeWord")}
-            aria-pressed={wholeWord}
-            title={t("workspace.searchWholeWord")}
-            type="button"
-          >
-            ab
-          </button>
-          <button
-            className={`code-search__toggle${regexEnabled ? " code-search__toggle--on" : ""}`}
-            onClick={() => {
-              setCurrentMatchIdx(0);
-              setRegexEnabled((enabled) => !enabled);
-            }}
-            aria-label={t("workspace.searchRegex")}
-            aria-pressed={regexEnabled}
-            title={t("workspace.searchRegex")}
-            type="button"
-          >
-            .*
-          </button>
+          <div className="code-search__actions">
+            <button
+              className={`code-search__toggle${caseSensitive ? " code-search__toggle--on" : ""}`}
+              onClick={() => {
+                setCurrentMatchIdx(0);
+                setCaseSensitive((enabled) => !enabled);
+              }}
+              aria-label={t("workspace.searchMatchCase")}
+              aria-pressed={caseSensitive}
+              title={t("workspace.searchMatchCase")}
+              type="button"
+            >
+              Aa
+            </button>
+            <button
+              className={`code-search__toggle${wholeWord ? " code-search__toggle--on" : ""}`}
+              onClick={() => {
+                setCurrentMatchIdx(0);
+                setWholeWord((enabled) => !enabled);
+              }}
+              aria-label={t("workspace.searchWholeWord")}
+              aria-pressed={wholeWord}
+              title={t("workspace.searchWholeWord")}
+              type="button"
+            >
+              ab
+            </button>
+            <button
+              className={`code-search__toggle${regexEnabled ? " code-search__toggle--on" : ""}`}
+              onClick={() => {
+                setCurrentMatchIdx(0);
+                setRegexEnabled((enabled) => !enabled);
+              }}
+              aria-label={t("workspace.searchRegex")}
+              aria-pressed={regexEnabled}
+              title={t("workspace.searchRegex")}
+              type="button"
+            >
+              .*
+            </button>
 
-          {query && !searchPending && totalMatches > 0 && (
-            <>
-              <button
-                className="code-search__nav"
-                onClick={() => jumpToMatch(-1)}
-                aria-label={t("workspace.searchPrevious")}
-                title={t("workspace.searchPrevious")}
-                type="button"
-              >
-                <svg width="12" height="12" viewBox="0 0 12 12"><path d="M6 2L2 6l4 4" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
-              </button>
-              <button
-                className="code-search__nav"
-                onClick={() => jumpToMatch(1)}
-                aria-label={t("workspace.searchNext")}
-                title={t("workspace.searchNext")}
-                type="button"
-              >
-                <svg width="12" height="12" viewBox="0 0 12 12"><path d="M2 2l4 4-4 4" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
-              </button>
-            </>
-          )}
+            {query && !searchPending && totalMatches > 0 && (
+              <>
+                <button
+                  className="code-search__nav"
+                  onClick={() => jumpToMatch(-1)}
+                  aria-label={t("workspace.searchPrevious")}
+                  title={t("workspace.searchPrevious")}
+                  type="button"
+                >
+                  <svg width="12" height="12" viewBox="0 0 12 12"><path d="M6 2L2 6l4 4" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
+                </button>
+                <button
+                  className="code-search__nav"
+                  onClick={() => jumpToMatch(1)}
+                  aria-label={t("workspace.searchNext")}
+                  title={t("workspace.searchNext")}
+                  type="button"
+                >
+                  <svg width="12" height="12" viewBox="0 0 12 12"><path d="M2 2l4 4-4 4" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
+                </button>
+              </>
+            )}
 
-          <button
-            className="code-search__close"
-            onClick={closeSearch}
-            aria-label={t("workspace.searchClose")}
-            title={t("workspace.searchClose")}
-            type="button"
-          >
-            ✕
-          </button>
+            <CopyButton
+              text={value}
+              className="code-search__copy"
+              showInlineLabel={false}
+            />
+            <button
+              className="code-search__close"
+              onClick={closeSearch}
+              aria-label={t("workspace.searchClose")}
+              title={t("workspace.searchClose")}
+              type="button"
+            >
+              ✕
+            </button>
+          </div>
         </div>
       )}
 
@@ -611,7 +618,7 @@ export default function LineNumberCode({
           </div>
         )}
       </div>
-      <CopyButton text={value} className="code-block__copy" />
+      {!searchOpen && <CopyButton text={value} className="code-block__copy" />}
     </div>
   );
 }

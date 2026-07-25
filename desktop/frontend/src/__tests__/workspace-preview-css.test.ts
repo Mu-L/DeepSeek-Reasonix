@@ -88,9 +88,12 @@ eq(finalDeclaration(".workspace-preview__body--code .code-block__wrap", "min-hei
 eq(finalDeclaration(".workspace-preview__body--code .code-search", "position"), "static", "workspace search toolbar participates in layout");
 eq(finalDeclaration(".workspace-preview__body--code .code-search", "z-index"), "var(--z-local-handle)", "workspace search toolbar stays clickable above the copy affordance");
 eq(finalDeclaration(".workspace-preview__body--code .code-search", "flex"), "0 0 auto", "workspace search toolbar keeps a dedicated row");
+eq(finalDeclaration(".workspace-preview__body--code .code-search", "flex-wrap"), "wrap", "narrow workspace search toolbars can form a second control row");
 eq(finalDeclaration(".workspace-preview__body--code .code-search", "width"), "100%", "workspace search toolbar spans the code viewport");
 eq(finalDeclaration(".workspace-preview__body--code .code-search", "border-width"), "0 0 1px", "workspace search toolbar uses a divider instead of a floating card");
 eq(finalDeclaration(".workspace-preview__body--code .code-search", "box-shadow"), "none", "workspace search toolbar does not retain popup elevation");
+eq(finalDeclaration(".code-search__actions", "display"), "flex", "search actions remain one coherent wrapping group");
+eq(finalDeclaration(".code-search__actions", "margin-left"), "auto", "wrapped search actions stay aligned to the toolbar edge");
 eq(finalDeclaration(".workspace-preview__body--code .code", "overflow"), "auto", "code viewport owns horizontal and vertical scrolling");
 eq(finalDeclaration(".workspace-preview__body--code .code", "min-height"), "0", "code viewport can shrink inside the preview pane");
 eq(finalDeclaration(".workspace-preview__body--code .code", "margin"), "0", "code viewport scrollbar sits at the visible pane bottom");

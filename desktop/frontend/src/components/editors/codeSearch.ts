@@ -145,6 +145,8 @@ function collectMatches(
   const matches: CodeSearchMatch[] = [];
   const lines = typeof source === "string" ? source.split("\n") : source;
   let absoluteOffset = 0;
+  let sawZeroLengthMatch = false;
+  let sawNonEmptyMatch = false;
 
   for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
     const line = lines[lineIndex];
@@ -152,10 +154,12 @@ function collectMatches(
     let match: RegExpExecArray | null;
     while ((match = pattern.exec(line)) !== null) {
       if (match[0].length === 0) {
-        if (rejectZeroLength) return { error: "zero_length_unsupported" };
-        pattern.lastIndex += 1;
+        sawZeroLengthMatch = true;
+        const nextCodePoint = line.codePointAt(pattern.lastIndex);
+        pattern.lastIndex += nextCodePoint != null && nextCodePoint > 0xffff ? 2 : 1;
         continue;
       }
+      sawNonEmptyMatch = true;
 
       const start = match.index;
       const end = start + match[0].length;
@@ -177,6 +181,9 @@ function collectMatches(
     absoluteOffset += line.length + 1;
   }
 
+  if (rejectZeroLength && sawZeroLengthMatch && !sawNonEmptyMatch) {
+    return { error: "zero_length_unsupported" };
+  }
   return { matches, truncated: false };
 }
 

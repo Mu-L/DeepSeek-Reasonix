@@ -4924,6 +4924,13 @@ a[href] {
   color: var(--danger);
   text-overflow: ellipsis;
 }
+.code-search__actions {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 2px;
+  margin-left: auto;
+}
 .code-search__close {
   display: inline-flex;
   align-items: center;
@@ -4939,6 +4946,26 @@ a[href] {
   flex-shrink: 0;
 }
 .code-search__close:hover {
+  background: var(--bg-elev-1);
+  color: var(--fg);
+}
+.code-search__copy.copybtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 20px;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  gap: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fg-faint);
+}
+.code-search__copy.copybtn:hover,
+.code-search__copy.copybtn:focus-visible {
+  gap: 0;
   background: var(--bg-elev-1);
   color: var(--fg);
 }
@@ -9171,6 +9198,7 @@ body > .mermaid-diagram--fullscreen {
   position: static;
   z-index: var(--z-local-handle);
   flex: 0 0 auto;
+  flex-wrap: wrap;
   box-sizing: border-box;
   width: 100%;
   max-width: none;
