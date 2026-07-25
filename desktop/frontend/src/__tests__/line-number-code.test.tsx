@@ -328,6 +328,32 @@ ok(
   "keeps copy available as a visible search-toolbar action",
 );
 
+const pendingRequestContainer = document.createElement("div");
+document.body.appendChild(pendingRequestContainer);
+const pendingRequestRoot = createRoot(pendingRequestContainer);
+let pendingRequestConsumed = false;
+await act(async () => {
+  pendingRequestRoot.render(
+    <LocaleProvider>
+      <LineNumberCode
+        value="pending search"
+        showLineNumbers
+        searchRequestPending
+        onSearchRequestConsumed={() => {
+          pendingRequestConsumed = true;
+        }}
+      />
+    </LocaleProvider>,
+  );
+  await flush();
+});
+ok(
+  pendingRequestContainer.querySelector(".code-search") != null,
+  "consumes a search request that arrived before the editor mounted",
+);
+ok(pendingRequestConsumed, "acknowledges a consumed search request");
+await act(async () => pendingRequestRoot.unmount());
+
 const searchInput = container.querySelector<HTMLInputElement>(".code-search__input")!;
 await act(async () => {
   const setter = Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, "value")?.set;

@@ -273,7 +273,8 @@ export function WorkspacePanel({
   const [treeWidthMode, setTreeWidthMode] = useState<WorkspaceSplitTreeWidthMode>("manual");
   const [treeResizing, setTreeResizing] = useState(false);
   const [recentOpen, setRecentOpen] = useState(false);
-  const [codeSearchRequestId, setCodeSearchRequestId] = useState(0);
+  const [codeSearchRequestPending, setCodeSearchRequestPending] = useState(false);
+  const [codeSearchRequestPath, setCodeSearchRequestPath] = useState<string | null>(null);
   /** Changes overview: commit history is secondary and starts collapsed. */
   const [commitHistoryOpen, setCommitHistoryOpen] = useState(false);
   const lastPreviewModeActiveRef = useRef<boolean | null>(null);
@@ -1416,10 +1417,19 @@ export function WorkspacePanel({
       !preview.binary &&
       !isMarkdown,
   );
+  useEffect(() => {
+    setCodeSearchRequestPending(false);
+    setCodeSearchRequestPath(null);
+  }, [selectedPath]);
+
   const openCodeSearch = () => {
-    if (!codePreviewActive) return;
-    setCodeSearchRequestId((requestId) => requestId + 1);
+    if (!codePreviewActive || !selectedPath) return;
+    setCodeSearchRequestPath(selectedPath);
+    setCodeSearchRequestPending(true);
   };
+  const consumeCodeSearchRequest = useCallback(() => {
+    setCodeSearchRequestPending(false);
+  }, []);
   const treeBlankMenuItems: ContextMenuItem[] = [
     {
       key: "refresh-tree",
@@ -1879,7 +1889,8 @@ export function WorkspacePanel({
                   language={languageFor(selectedPath)}
                   sourceSize={preview.size}
                   showLineNumbers
-                  searchRequestId={codeSearchRequestId}
+                  searchRequestPending={codeSearchRequestPending && codeSearchRequestPath === selectedPath}
+                  onSearchRequestConsumed={consumeCodeSearchRequest}
                 />
               )}
             </>

@@ -158,7 +158,8 @@ export default function LineNumberCode({
   showLineNumbers,
   maxHeight,
   sourceSize,
-  searchRequestId,
+  searchRequestPending,
+  onSearchRequestConsumed,
 }: EditorProps) {
   const t = useT();
   const lines = useMemo(() => value.split("\n"), [value]);
@@ -188,7 +189,6 @@ export default function LineNumberCode({
   const inputRef = useRef<HTMLInputElement>(null);
   const searchTimerRef = useRef<number | null>(null);
   const regexRequestIdRef = useRef(0);
-  const lastSearchRequestIdRef = useRef(searchRequestId);
 
   const openSearch = useCallback(() => {
     setSearchOpen(true);
@@ -199,10 +199,10 @@ export default function LineNumberCode({
   }, []);
 
   useEffect(() => {
-    if (searchRequestId === lastSearchRequestIdRef.current) return;
-    lastSearchRequestIdRef.current = searchRequestId;
+    if (!searchRequestPending) return;
     openSearch();
-  }, [openSearch, searchRequestId]);
+    onSearchRequestConsumed?.();
+  }, [onSearchRequestConsumed, openSearch, searchRequestPending]);
 
   const literalSearchResult = useMemo(
     () => regexEnabled
