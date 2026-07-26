@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"reasonix/internal/tool"
 )
@@ -22,7 +23,7 @@ func NewRememberTool(store Store) tool.Tool { return rememberTool{store: store} 
 func (rememberTool) Name() string { return "remember" }
 
 func (rememberTool) Description() string {
-	return "Save a durable fact to project memory so it survives across sessions. " +
+	return "Save a durable background fact so it survives across sessions. " +
 		"Use for things worth remembering long-term: who the user is and their preferences (type \"user\"); " +
 		"guidance on how to work, including the why (type \"feedback\"); ongoing goals or constraints not " +
 		"derivable from the code (type \"project\"); or pointers to external resources (type \"reference\"). " +
@@ -30,6 +31,8 @@ func (rememberTool) Description() string {
 		"link related memories inline with [[their-name]]. " +
 		"Do NOT save what the repo already records (code structure, git history) or facts that only matter to the current conversation; " +
 		"if asked to remember one of those, save instead the non-obvious point behind it. " +
+		"Choose scope \"project\" for the current workspace (the safe default) or \"global\" only when the fact should affect every project. " +
+		"Standing rules that must always be followed belong in project or global REASONIX.md/AGENTS.md instructions, not background memory. " +
 		"Before saving, check the loaded memory index for an entry that already covers this — reuse that name to update it rather than create a near-duplicate, and use `forget` to drop one that is now wrong. " +
 		"The saved index loads into context at the start of each session."
 }
@@ -42,6 +45,7 @@ func (rememberTool) Schema() json.RawMessage {
 			"title": {"type": "string", "description": "Short human-readable label shown in the memory index, e.g. \"Prefers tabs\". Omit to derive one from the name."},
 			"description": {"type": "string", "description": "One-line hook shown in the index — the phrase a future session reads to decide whether to open this memory. Make it specific."},
 			"type": {"type": "string", "enum": ["user", "feedback", "project", "reference"], "description": "Category of the fact."},
+			"scope": {"type": "string", "enum": ["project", "global"], "description": "Where the fact applies. Omit for the safe default, project; use global only when it should affect every workspace."},
 			"body": {"type": "string", "description": "The fact itself (Markdown). For feedback/project, include a \"**Why:**\" line and a \"**How to apply:**\" line; link related memories with [[their-name]]."}
 		},
 		"required": ["description", "body"]
@@ -54,6 +58,7 @@ func (t rememberTool) Execute(ctx context.Context, args json.RawMessage) (string
 		Title       string `json:"title"`
 		Description string `json:"description"`
 		Type        string `json:"type"`
+		Scope       string `json:"scope"`
 		Body        string `json:"body"`
 	}
 	if err := json.Unmarshal(args, &in); err != nil {
@@ -62,6 +67,11 @@ func (t rememberTool) Execute(ctx context.Context, args json.RawMessage) (string
 	if in.Description == "" || in.Body == "" {
 		return "", fmt.Errorf("description and body are required")
 	}
+	scope := strings.ToLower(strings.TrimSpace(in.Scope))
+	if scope != "" && scope != string(FactScopeProject) && scope != string(FactScopeGlobal) {
+		return "", fmt.Errorf("scope must be one of project, global")
+	}
+	factScope := NormalizeFactScope(scope)
 	name := in.Name
 	if name == "" {
 		name = in.Title // Save slugifies; the title (or, below, the description) makes a serviceable slug
@@ -74,6 +84,7 @@ func (t rememberTool) Execute(ctx context.Context, args json.RawMessage) (string
 		Title:       in.Title,
 		Description: in.Description,
 		Type:        NormalizeType(in.Type),
+		Scope:       factScope,
 		Body:        in.Body,
 	})
 	if err != nil {
@@ -82,7 +93,7 @@ func (t rememberTool) Execute(ctx context.Context, args json.RawMessage) (string
 	if q, ok := QueueFromContext(ctx); ok {
 		q.QueueMemory("Saved memory \"" + slug(name) + "\": " + oneLine(in.Description))
 	}
-	return fmt.Sprintf("Saved memory to %s (it applies now and loads automatically in future sessions).", path), nil
+	return fmt.Sprintf("Saved memory (%s background) to %s (it applies now and its index loads automatically in future sessions).", factScope, path), nil
 }
 
 func (rememberTool) ReadOnly() bool { return false }

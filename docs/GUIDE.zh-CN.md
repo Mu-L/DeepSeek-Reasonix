@@ -649,11 +649,23 @@ custom path 或包含更多手写结构的 Skill，避免丢失 frontmatter、re
 完整 CLI 参数、Skill 文件格式、模型优先级、安全行为和排障说明见
 [子智能体 Profile](./SUBAGENT_PROFILES.zh-CN.md)。
 
-`/memory` 会同时列出记忆文档（`REASONIX.md` / `AGENTS.md`）和已保存的 auto-memory 条目。
+`/memory` 会列出两个用途不同的层次：
+
+- **常驻指令**来自分层加载的 `REASONIX.md`、`AGENTS.md` 和 `CLAUDE.md`（包括本地与
+  用户全局变体）。它们会持续参与上下文，适合存放智能体必须始终遵守的规则。
+- **背景记忆**是由 `remember` / `forget` 管理的单事实 Markdown 文件。事实可能过时，
+  因此智能体只在相关时检索并核验，而不会把它当作命令。
+
+每条背景记忆都有相互独立的 `type`（`user`、`feedback`、`project`、`reference`）和
+`scope`（`project`、`global`）。新事实默认是 `project`；只有显式选择才会写成
+`global`。因此，类型为 `feedback` 的项目反馈不会再被自动提升为全局记忆。旧文件若没有
+`metadata.scope` 仍可兼容，Reasonix 会根据它位于项目目录还是全局目录推导作用域。
+
 在 agent 回合中，只读的 `history` 和 `memory` 工具可以按需检索历史 session 决策、
 compaction archive 和已保存事实；这些动态内容不会被塞进稳定的 system prompt 前缀。
 `/forget <name>` 会把已保存事实归档而不是永久删除；CLI/TUI 和桌面记忆面板能显示归档文件用于追溯，
-但它们不会作为 active memory 被检索。检索会保留 BM25 最强命中，同时裁掉弱的泛词命中；
+但它们不会作为 active memory 被检索。记忆索引以 `[scope/type]` 同时标明两个维度，
+`memory` 工具也可以按任一维度筛选。检索会保留 BM25 最强命中，同时裁掉弱的泛词命中；
 agent 发起的 `remember` 和 `forget` 每次都会要求新的人工确认，并在执行前展示将保存或归档的记忆摘要；
 Guardian 审查不能代替用户批准，非交互运行会拒绝这类工具而不是自动批准。
 0 结果会提示 agent 改用更少、更有区分度的词继续查。

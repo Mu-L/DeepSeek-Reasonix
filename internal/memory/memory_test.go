@@ -38,6 +38,20 @@ func TestComposeAppendsAfterBase(t *testing.T) {
 	}
 }
 
+func TestBlockSeparatesStandingInstructionsFromBackgroundMemory(t *testing.T) {
+	set := &Set{
+		Docs:  []Source{{Path: "/p/AGENTS.md", Scope: ScopeProject, Body: "Always run tests."}},
+		Index: "- [API decision](api-decision.md) — [project/project] Chosen in an earlier session",
+		Store: Store{Dir: "/memory/project"},
+	}
+	block := set.Block()
+	for _, want := range []string{"## Standing instructions", "### /p/AGENTS.md (project)", "## Background memory index", "background, not standing instructions"} {
+		if !strings.Contains(block, want) {
+			t.Fatalf("Block() missing %q:\n%s", want, block)
+		}
+	}
+}
+
 // TestDiscoverPrecedenceOrder checks user → ancestor → project → local ordering,
 // which puts the most specific guidance last.
 func TestDiscoverPrecedenceOrder(t *testing.T) {

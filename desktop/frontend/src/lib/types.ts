@@ -993,6 +993,7 @@ export interface MemoryFact {
   title?: string;
   description: string;
   type: string; // "user" | "feedback" | "project" | "reference"
+  scope: string; // "project" | "global"
   body: string;
 }
 
@@ -1012,6 +1013,7 @@ export interface MemorySuggestion {
   title: string;
   description: string;
   type: string;
+  scope: string; // "project" | "global"
   body: string;
   reason: string;
   evidence: string[];

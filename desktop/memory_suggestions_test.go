@@ -53,6 +53,9 @@ func TestMemorySuggestionsAcceptMemoryCandidate(t *testing.T) {
 	if len(view.Memories) == 0 {
 		t.Fatalf("MemorySuggestions() memories = %+v, want at least one candidate", view.Memories)
 	}
+	if view.Memories[0].Scope != string(memory.FactScopeProject) {
+		t.Fatalf("candidate scope = %q, want project", view.Memories[0].Scope)
+	}
 	path, err := app.AcceptMemorySuggestion(view.Memories[0])
 	if err != nil {
 		t.Fatalf("AcceptMemorySuggestion: %v", err)
@@ -61,7 +64,7 @@ func TestMemorySuggestionsAcceptMemoryCandidate(t *testing.T) {
 		t.Fatal("AcceptMemorySuggestion returned empty path")
 	}
 	got := store.List()
-	if len(got) != 1 || !strings.Contains(got[0].Body, "中文回复") {
+	if len(got) != 1 || got[0].Scope != memory.FactScopeProject || !strings.Contains(got[0].Body, "中文回复") {
 		t.Fatalf("saved memories = %+v, want confirmed candidate body", got)
 	}
 }

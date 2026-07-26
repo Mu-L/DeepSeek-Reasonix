@@ -21,7 +21,7 @@ func TestRememberToolSaves(t *testing.T) {
 		t.Fatal("remember schema is not valid JSON")
 	}
 
-	args := []byte(`{"name":"likes-go","title":"Likes Go","description":"User likes Go","type":"user","body":"Default to Go for backend work."}`)
+	args := []byte(`{"name":"likes-go","title":"Likes Go","description":"User likes Go","type":"user","scope":"global","body":"Default to Go for backend work."}`)
 	out, err := tl.Execute(context.Background(), args)
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
@@ -31,11 +31,23 @@ func TestRememberToolSaves(t *testing.T) {
 	}
 
 	list := store.List()
-	if len(list) != 1 || list[0].Name != "likes-go" || list[0].Type != TypeUser {
+	if len(list) != 1 || list[0].Name != "likes-go" || list[0].Type != TypeUser || list[0].Scope != FactScopeGlobal {
 		t.Fatalf("memory not saved correctly: %+v", list)
 	}
 	if list[0].Title != "Likes Go" {
 		t.Fatalf("title not persisted through the tool: %q", list[0].Title)
+	}
+}
+
+func TestRememberToolDefaultsToProjectScope(t *testing.T) {
+	root := t.TempDir()
+	store := Store{Dir: root + "/project", GlobalDir: root + "/global"}
+	if _, err := NewRememberTool(store).Execute(context.Background(), []byte(`{"name":"project-feedback","description":"current project only","type":"feedback","body":"body"}`)); err != nil {
+		t.Fatal(err)
+	}
+	list := store.List()
+	if len(list) != 1 || list[0].Scope != FactScopeProject {
+		t.Fatalf("memory = %+v, want project scope", list)
 	}
 }
 
@@ -48,6 +60,9 @@ func TestRememberToolValidates(t *testing.T) {
 	}
 	if _, err := tl.Execute(context.Background(), []byte(`{"body":"b"}`)); err == nil {
 		t.Fatal("expected error when description is missing")
+	}
+	if _, err := tl.Execute(context.Background(), []byte(`{"description":"d","body":"b","scope":"workspace"}`)); err == nil {
+		t.Fatal("expected error for an unknown scope")
 	}
 }
 

@@ -800,8 +800,23 @@ the desktop settings page.
 See [Subagent profiles](./SUBAGENT_PROFILES.md) for the complete CLI reference,
 Skill file format, model precedence, safety behavior, and troubleshooting.
 
-`/memory` lists both memory documents (`REASONIX.md` / `AGENTS.md`) and saved
-auto-memory facts. During agent turns, the read-only `history` and `memory`
+`/memory` lists two intentionally different layers:
+
+- **Standing instructions** come from hierarchical `REASONIX.md`, `AGENTS.md`,
+  and `CLAUDE.md` files (including local and user-global variants). They remain
+  in context and are the right place for rules the agent must always follow.
+- **Background memory** is a set of one-fact Markdown files maintained through
+  `remember` and `forget`. Facts may be stale, so the agent retrieves and checks
+  them when relevant rather than treating them as commands.
+
+Each background fact has an independent `type` (`user`, `feedback`, `project`,
+or `reference`) and `scope` (`project` or `global`). New facts default to
+`project`; `global` must be chosen explicitly. This means, for example, that
+project-specific feedback remains local even though its type is `feedback`.
+Legacy facts without `metadata.scope` remain compatible: Reasonix infers their
+scope from the project or global directory that contains them.
+
+During agent turns, the read-only `history` and `memory`
 tools let the model retrieve prior session decisions, compacted-history
 archives, and saved facts on demand instead of injecting that dynamic state into
 the stable system prompt. `/forget <name>` archives a saved fact rather than
@@ -811,8 +826,10 @@ Agent-initiated `remember` and `forget` calls always ask for fresh human approva
 and show a compact preview of the saved or archived memory before they run.
 Guardian review cannot answer for the user; non-interactive runs refuse these
 tools instead of auto-approving them.
-Retrieval keeps the top BM25 result while trimming weak common-word matches, and
-0-result responses suggest narrower, more distinctive follow-up searches.
+The memory index records both dimensions as `[scope/type]`, and the `memory`
+tool can filter by either one. Retrieval keeps the top BM25 result while
+trimming weak common-word matches, and 0-result responses suggest narrower,
+more distinctive follow-up searches.
 The Memory v5 execution compiler has been removed. Earlier releases (up to
 v1.17.x) could compile a user turn into a `<memory-compiler-execution>` contract
 and store local compiler state; current releases never do either, the

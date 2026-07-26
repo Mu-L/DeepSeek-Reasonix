@@ -33,6 +33,7 @@ type MemorySuggestion struct {
 	Title       string   `json:"title"`
 	Description string   `json:"description"`
 	Type        string   `json:"type"`
+	Scope       string   `json:"scope"`
 	Body        string   `json:"body"`
 	Reason      string   `json:"reason"`
 	Evidence    []string `json:"evidence"`
@@ -154,6 +155,7 @@ func (a *App) AcceptMemorySuggestionForTab(tabID string, in MemorySuggestion) (s
 		Title:       oneLine(in.Title),
 		Description: desc,
 		Type:        memory.NormalizeType(in.Type),
+		Scope:       memory.NormalizeFactScope(in.Scope),
 		Body:        body,
 	})
 }
@@ -256,6 +258,7 @@ func suggestMemories(set *memory.Set, sessions []suggestionSession) []MemorySugg
 				Title:       title,
 				Description: oneLine(statement),
 				Type:        string(typ),
+				Scope:       string(memory.FactScopeProject),
 				Body:        memoryCandidateBody(statement, reason, sess),
 				Reason:      reason,
 				Evidence:    []string{sessionEvidence(sess, statement)},

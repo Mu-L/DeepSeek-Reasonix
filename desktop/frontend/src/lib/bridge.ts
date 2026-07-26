@@ -1557,7 +1557,7 @@ function makeMockApp(): AppBindings {
     provider.apiKeyEnv === "DEEPSEEK_API_KEY" ? { ...provider, keySet: !freshMock } : provider,
   );
   if (freshMock) {
-    settings.configPath = "~/.config/reasonix/config.toml";
+    settings.configPath = "~/.reasonix/config.toml";
   }
   const mockNow = Date.now();
   const mockProjectTree: ProjectNode[] = freshMock ? [] : [
@@ -3594,8 +3594,8 @@ function makeMockApp(): AppBindings {
     async Memory() {
       return {
         available: true,
-        storeDir: "~/.config/reasonix/projects/-mock/memory",
-        storeGlobalDir: "~/.config/reasonix/memory/global",
+        storeDir: "~/.reasonix/projects/-mock/memory",
+        storeGlobalDir: "~/.reasonix/memory/global",
         docs: [
           {
             path: "REASONIX.md",
@@ -3603,7 +3603,7 @@ function makeMockApp(): AppBindings {
             body: "# Reasonix project memory\n\nMock doc shown in the browser dev seam.\n\n## Notes\n\n- prefers concise replies",
           },
           {
-            path: "~/.config/reasonix/REASONIX.md",
+            path: "~/.reasonix/REASONIX.md",
             scope: "user",
             body: t("mock.memoryBody"),
           },
@@ -3613,6 +3613,7 @@ function makeMockApp(): AppBindings {
             name: "prefers-tabs",
             description: "User prefers tabs",
             type: "user",
+            scope: "project",
             body: "Indent with tabs.",
           },
         ],
@@ -3621,13 +3622,14 @@ function makeMockApp(): AppBindings {
             name: "old-plan",
             description: "Superseded planning note",
             type: "project",
+            scope: "project",
             body: "This plan was archived after the implementation changed.",
-            path: "~/.config/reasonix/projects/-mock/memory/.archive/20260612-021500.000-old-plan.md",
+            path: "~/.reasonix/projects/-mock/memory/.archive/20260612-021500.000-old-plan.md",
             archivedAt: "2026-06-12T02:15:00Z",
           },
         ],
         scopes: [
-          { scope: "user", path: "~/.config/reasonix/REASONIX.md" },
+          { scope: "user", path: "~/.reasonix/REASONIX.md" },
           { scope: "project", path: "REASONIX.md" },
           { scope: "local", path: "REASONIX.local.md" },
         ],
@@ -3642,6 +3644,7 @@ function makeMockApp(): AppBindings {
             title: "Prefers concise replies",
             description: "User prefers concise replies unless detail is requested.",
             type: "user",
+            scope: "project",
             body: "User prefers concise replies unless detail is requested.\n\n**Why:** Suggested from recent local history.\n**How to apply:** Keep answers brief by default.",
             reason: "future-facing preference",
             evidence: ["mock-session: always keep replies concise"],

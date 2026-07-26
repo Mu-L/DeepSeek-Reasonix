@@ -83,16 +83,26 @@ It supports:
 
 - `search`: BM25 over active memory files.
 - `read`: return one full active memory by name.
-- `list`: show the active memory index, optionally filtered by type.
+- `list`: show the active memory index, optionally filtered by type and scope.
 
-Only active memories from the project memory store participate. Archived memory
-files are excluded from `search`, `read`, and `list`.
+Active memories from the current project's store and the explicitly global
+store participate. Archived memory files are excluded from `search`, `read`,
+and `list`.
+
+Fact category and reach are separate fields:
+
+- `type` is `user`, `feedback`, `project`, or `reference`;
+- `scope` is `project` or `global` and can independently filter search/list;
+- a new fact defaults to project scope, while global scope must be explicit;
+- a legacy file without `metadata.scope` derives its scope from its containing
+  project/global directory without requiring a rewrite.
 
 The searchable text combines:
 
 - slug/name;
 - title;
 - normalized type;
+- normalized scope;
 - description;
 - body.
 
@@ -130,6 +140,7 @@ This is intentionally a suggestion layer, not an automatic writer:
   desktop UI preference that scans automatically when the Suggestions tab opens;
 - candidates show their proposed body plus short evidence snippets before any
   write;
+- memory candidates default to project scope;
 - accepting a memory candidate writes through the controller's active memory
   path, so the current session gets the same transient turn-tail update as a
   `remember` write;

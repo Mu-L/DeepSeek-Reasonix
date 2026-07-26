@@ -20,7 +20,7 @@ function displayTitle(fact: MemoryFact): string {
 function memoryMatches(fact: MemoryFact, normalizedQuery: string, typeFilter: string): boolean {
   if (typeFilter !== "all" && fact.type !== typeFilter) return false;
   if (!normalizedQuery) return true;
-  return [displayTitle(fact), fact.name, fact.description, fact.type, fact.body]
+  return [displayTitle(fact), fact.name, fact.description, fact.type, fact.scope, fact.body]
     .join(" ")
     .toLowerCase()
     .includes(normalizedQuery);
@@ -82,6 +82,7 @@ function ArchivedMemoryList({
                   <span className="mem-fact__main">
                     <span className="mem-fact__title">{displayTitle(f)}</span>
                     <span className="mem-fact__meta">
+                      <MemoryFactScope scope={f.scope} t={t} />
                       {f.type && <span className="mem-fact__type" data-mem-type={f.type}>{memoryTypeLabel(f.type, t)}</span>}
                       <span className="mem-fact__slug">{f.name}</span>
                       {f.archivedAt && (
@@ -130,6 +131,8 @@ function memoryScopeLabel(scope: string, t: ReturnType<typeof useT>): string {
   switch (scope) {
     case "project":
       return t("memory.scope.project");
+    case "global":
+      return t("memory.scope.global");
     case "user":
       return t("memory.scope.user");
     case "local":
@@ -139,6 +142,11 @@ function memoryScopeLabel(scope: string, t: ReturnType<typeof useT>): string {
     default:
       return scope;
   }
+}
+
+function MemoryFactScope({ scope, t }: { scope: string; t: ReturnType<typeof useT> }) {
+  if (!scope) return null;
+  return <span className="mem-fact__scope" data-mem-scope={scope}>{memoryScopeLabel(scope, t)}</span>;
 }
 
 function memoryTypeLabel(type: string, t: ReturnType<typeof useT>): string {
@@ -512,6 +520,7 @@ export function MemoryPanel({
                           <span className="mem-fact__main">
                             <span className="mem-fact__title">{displayTitle(f)}</span>
                             <span className="mem-fact__meta">
+                              <MemoryFactScope scope={f.scope} t={t} />
                               {f.type && <span className="mem-fact__type" data-mem-type={f.type}>{memoryTypeLabel(f.type, t)}</span>}
                               <span className="mem-fact__slug">{f.name}</span>
                             </span>
@@ -724,6 +733,7 @@ export function MemoryPanel({
               ) : (
                 filteredFacts.map((f) => (
                   <div className="mem-fact" key={f.name} title={f.body}>
+                    <span className={`badge badge--${f.scope}`}>{memoryScopeLabel(f.scope, t)}</span>
                     <span className={`badge badge--${f.type}`}>{memoryTypeLabel(f.type, t)}</span>
                     <div className="mem-fact__text">
                       <div className="mem-fact__name">{f.name}</div>
@@ -1155,61 +1165,7 @@ export function MemorySettingsPage() {
 						<div className="mem-section__title">{t("memory.savedMemories")}</div>
 						<div className="mem-note">{t("memory.fallibleNote")}</div>
 					</div>
-					<div className="mem-section__actions">
-						<button
-							className="btn btn--small"
-							type="button"
-							disabled={busy}
-							onClick={() => setShowAdd((v) => !v)}
-						>
-							{showAdd ? t("common.collapse") : <><Plus size={13} />{t("memory.addMemory")}</>}
-						</button>
-					</div>
 				</div>
-				{showAdd && (
-					<div className="mem-add-card">
-						<div className="mem-add-card__head">
-							<div>
-								<strong>{t("memory.addMemory")}</strong>
-								<span>{t("memory.addMemoryHint")}</span>
-							</div>
-						</div>
-						<div className="mem-add">
-							<Tooltip label={t("memory.whereToSave")}>
-								<select
-									className="mem-select"
-									value={activeScope}
-									onChange={(e) => setScope(e.target.value)}
-								>
-									{scopes.map((s) => (
-										<option key={s.scope} value={s.scope}>
-											{memoryScopeLabel(s.scope, t)}
-										</option>
-									))}
-								</select>
-							</Tooltip>
-							<input
-								className="mem-input"
-								placeholder={t("memory.notePlaceholder")}
-								value={note}
-								onChange={(e) => setNote(e.target.value)}
-								onKeyDown={(e) => {
-									if (e.key === "Enter") void submitNote();
-								}}
-							/>
-							<button
-								className="btn btn--primary btn--small"
-								onClick={() => void submitNote()}
-								disabled={busy || !note.trim()}
-							>
-								{t("memory.remember")}
-							</button>
-						</div>
-						<div className="mem-hint">
-							{scopes.find((s) => s.scope === activeScope)?.path}
-						</div>
-					</div>
-				)}
 				{hasSavedFilters && <div className="mem-toolbar">
 					<label className="mem-search">
 						<Search size={14} />
@@ -1244,15 +1200,6 @@ export function MemorySettingsPage() {
 					<div className="mem-empty mem-empty--cta">
 						<strong>{t("memory.emptySavedTitle")}</strong>
 						<span>{t("memory.emptySavedBody")}</span>
-						<button
-							className="btn btn--primary btn--small"
-							type="button"
-							disabled={busy}
-							onClick={() => setShowAdd(true)}
-						>
-							<Plus size={13} />
-							{t("memory.addMemory")}
-						</button>
 					</div>
 				) : filteredFacts.length === 0 ? (
 					<div className="mem-empty">
@@ -1295,6 +1242,7 @@ export function MemorySettingsPage() {
 										<span className="mem-fact__main">
 											<span className="mem-fact__title">{displayTitle(f)}</span>
 											<span className="mem-fact__meta">
+												<MemoryFactScope scope={f.scope} t={t} />
 												{f.type && <span className="mem-fact__type" data-mem-type={f.type}>{memoryTypeLabel(f.type, t)}</span>}
 												<span className="mem-fact__slug">{f.name}</span>
 											</span>
@@ -1456,13 +1404,14 @@ export function MemorySettingsPage() {
 													type="button"
 													onClick={() => setExpandedSuggestion(open ? null : candidate.id)}
 												>
-													{open ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
-													<span className="mem-fact__main">
-														<span className="mem-fact__title">{candidate.title || candidate.name}</span>
-														<span className="mem-fact__meta">
-															<span className="mem-fact__type" data-mem-type={candidate.type}>{memoryTypeLabel(candidate.type, t)}</span>
-															<span className="mem-fact__slug">{candidate.name}</span>
-														</span>
+												{open ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
+												<span className="mem-fact__main">
+													<span className="mem-fact__title">{candidate.title || candidate.name}</span>
+													<span className="mem-fact__meta">
+														<MemoryFactScope scope={candidate.scope} t={t} />
+														<span className="mem-fact__type" data-mem-type={candidate.type}>{memoryTypeLabel(candidate.type, t)}</span>
+														<span className="mem-fact__slug">{candidate.name}</span>
+													</span>
 														<span className="mem-fact__desc">{candidate.description}</span>
 													</span>
 												</button>
@@ -1621,7 +1570,61 @@ export function MemorySettingsPage() {
 						<div className="mem-section__title">{t("memory.instructionFiles")}</div>
 						<div className="mem-note">{t("memory.instructionFilesHint")}</div>
 					</div>
+					<div className="mem-section__actions">
+						<button
+							className="btn btn--small"
+							type="button"
+							disabled={busy}
+							onClick={() => setShowAdd((v) => !v)}
+						>
+							{showAdd ? t("common.collapse") : <><Plus size={13} />{t("memory.addMemory")}</>}
+						</button>
+					</div>
 				</div>
+				{showAdd && (
+					<div className="mem-add-card">
+						<div className="mem-add-card__head">
+							<div>
+								<strong>{t("memory.addMemory")}</strong>
+								<span>{t("memory.addMemoryHint")}</span>
+							</div>
+						</div>
+						<div className="mem-add">
+							<Tooltip label={t("memory.whereToSave")}>
+								<select
+									className="mem-select"
+									value={activeScope}
+									onChange={(e) => setScope(e.target.value)}
+								>
+									{scopes.map((s) => (
+										<option key={s.scope} value={s.scope}>
+											{memoryScopeLabel(s.scope, t)}
+										</option>
+									))}
+								</select>
+							</Tooltip>
+							<input
+								className="mem-input"
+								placeholder={t("memory.notePlaceholder")}
+								value={note}
+								onChange={(e) => setNote(e.target.value)}
+								onKeyDown={(e) => {
+									if (e.key === "Enter") void submitNote();
+								}}
+							/>
+							<button
+								className="btn btn--primary btn--small"
+								onClick={() => void submitNote()}
+								disabled={busy || !note.trim()}
+							>
+								{t("memory.remember")}
+							</button>
+						</div>
+						<div className="mem-hint">
+							{scopes.find((s) => s.scope === activeScope)?.path}
+						</div>
+					</div>
+				)}
 				{view.docs.length === 0 && (
 					<div className="mem-empty">{t("memory.noDocs")}</div>
 				)}

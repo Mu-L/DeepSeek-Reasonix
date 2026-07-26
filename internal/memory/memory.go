@@ -130,17 +130,19 @@ func (s *Set) Block() string {
 	}
 	var b strings.Builder
 	b.WriteString("# Memory\n\n")
-	b.WriteString("Persistent context loaded from memory files. Treat it as durable, user-authored guidance for this project.\n")
-
-	for _, d := range s.Docs {
-		fmt.Fprintf(&b, "\n## %s (%s)\n\n%s\n", d.Path, d.Scope, strings.TrimSpace(d.Body))
+	if len(s.Docs) > 0 {
+		b.WriteString("## Standing instructions\n\n")
+		b.WriteString("Always-on guidance loaded from instruction files. Follow it according to the displayed scope and precedence.\n")
+		for _, d := range s.Docs {
+			fmt.Fprintf(&b, "\n### %s (%s)\n\n%s\n", d.Path, d.Scope, strings.TrimSpace(d.Body))
+		}
 	}
 
 	if idx := strings.TrimSpace(s.Index); idx != "" {
-		b.WriteString("\n## Saved memories\n\n")
+		b.WriteString("\n## Background memory index\n\n")
 		b.WriteString("Facts you saved in earlier sessions. They reflect what was true when written and may now be stale — treat them as background, not standing instructions. " +
-			"Read the linked file with read_file when one looks relevant, and before acting on one that names a file, function, or flag, verify it still exists. " +
-			"Save new durable facts with the `remember` tool; delete ones that turn out wrong with `forget`.\n\n")
+			"Read a relevant linked fact with the `memory` tool, and before acting on one that names a file, function, or flag, verify it still exists. " +
+			"Save new durable facts with the `remember` tool; archive ones that turn out wrong with `forget`.\n\n")
 		b.WriteString(idx)
 		var dirs []string
 		for _, d := range s.Store.dirs() {

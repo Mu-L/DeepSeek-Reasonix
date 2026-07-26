@@ -10716,6 +10716,7 @@ type MemoryFact struct {
 	Title       string `json:"title,omitempty"`
 	Description string `json:"description"`
 	Type        string `json:"type"`
+	Scope       string `json:"scope"`
 	Body        string `json:"body"`
 }
 
@@ -10725,6 +10726,7 @@ type MemoryArchive struct {
 	Title       string `json:"title,omitempty"`
 	Description string `json:"description"`
 	Type        string `json:"type"`
+	Scope       string `json:"scope"`
 	Body        string `json:"body"`
 	Path        string `json:"path"`
 	ArchivedAt  string `json:"archivedAt,omitempty"`
@@ -10802,7 +10804,7 @@ func (a *App) memoryForCtrl(ctrl control.SessionAPI, fallback bool) MemoryView {
 	}
 	for _, f := range set.Store.List() {
 		view.Facts = append(view.Facts, MemoryFact{
-			Name: f.Name, Title: f.Title, Description: f.Description, Type: string(f.Type), Body: f.Body,
+			Name: f.Name, Title: f.Title, Description: f.Description, Type: string(f.Type), Scope: string(f.Scope), Body: f.Body,
 		})
 	}
 	for _, f := range set.Store.ListArchived() {
@@ -10811,7 +10813,7 @@ func (a *App) memoryForCtrl(ctrl control.SessionAPI, fallback bool) MemoryView {
 			archivedAt = f.ArchivedAt.Format(time.RFC3339)
 		}
 		view.Archives = append(view.Archives, MemoryArchive{
-			Name: f.Name, Title: f.Title, Description: f.Description, Type: string(f.Type), Body: f.Body,
+			Name: f.Name, Title: f.Title, Description: f.Description, Type: string(f.Type), Scope: string(f.Scope), Body: f.Body,
 			Path: f.Path, ArchivedAt: archivedAt,
 		})
 	}

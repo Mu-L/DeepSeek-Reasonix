@@ -26,9 +26,9 @@ func NewRecallTool(store Store) tool.Tool { return recallTool{store: store} }
 func (recallTool) Name() string { return "memory" }
 
 func (recallTool) Description() string {
-	return "Search, list, and read saved project memories. " +
+	return "Search, list, and read saved background memories for this project, including explicitly global facts. " +
 		"Use this before saving a new memory to avoid duplicates, and when a saved memory from the index looks relevant but needs its full body. " +
-		"This tool is read-only; use remember to save or update a memory, and forget to delete one."
+		"This tool is read-only; use remember to save or update a memory, and forget to archive one."
 }
 
 func (recallTool) Schema() json.RawMessage {
@@ -39,6 +39,7 @@ func (recallTool) Schema() json.RawMessage {
 			"query": {"type": "string", "description": "Search query for operation=search."},
 			"name": {"type": "string", "description": "Memory slug for operation=read, e.g. the name in [Label](name.md)."},
 			"type": {"type": "string", "enum": ["user", "feedback", "project", "reference"], "description": "Optional memory type filter for search or list."},
+			"scope": {"type": "string", "enum": ["project", "global"], "description": "Optional scope filter for search or list."},
 			"limit": {"type": "integer", "description": "Maximum search/list results to return, default 8, max 20."}
 		},
 		"required": ["operation"]
@@ -51,6 +52,7 @@ func (t recallTool) Execute(ctx context.Context, args json.RawMessage) (string, 
 		Query     string `json:"query"`
 		Name      string `json:"name"`
 		Type      string `json:"type"`
+		Scope     string `json:"scope"`
 		Limit     int    `json:"limit"`
 	}
 	if err := json.Unmarshal(args, &in); err != nil {
@@ -63,10 +65,14 @@ func (t recallTool) Execute(ctx context.Context, args json.RawMessage) (string, 
 	if err != nil {
 		return "", err
 	}
+	memScope, err := recallScopeFilter(in.Scope)
+	if err != nil {
+		return "", err
+	}
 	limit := clampRecallLimit(in.Limit)
 	switch strings.TrimSpace(in.Operation) {
 	case "search":
-		hits, err := searchMemories(ctx, t.store, in.Query, memType, limit)
+		hits, err := searchMemories(ctx, t.store, in.Query, memType, memScope, limit)
 		if err != nil {
 			return "", err
 		}
@@ -78,7 +84,7 @@ func (t recallTool) Execute(ctx context.Context, args json.RawMessage) (string, 
 		}
 		return formatMemory(t.store, m), nil
 	case "list":
-		return formatMemoryList(t.store, filterMemories(t.store.List(), memType), limit), nil
+		return formatMemoryList(t.store, filterMemories(t.store.List(), memType, memScope), limit), nil
 	case "":
 		return "", fmt.Errorf("operation is required")
 	default:
@@ -103,7 +109,7 @@ type memoryDoc struct {
 	length int
 }
 
-func searchMemories(ctx context.Context, store Store, query string, typ Type, limit int) ([]memoryHit, error) {
+func searchMemories(ctx context.Context, store Store, query string, typ Type, scope FactScope, limit int) ([]memoryHit, error) {
 	query = strings.TrimSpace(query)
 	if query == "" {
 		return nil, fmt.Errorf("query is required")
@@ -112,7 +118,7 @@ func searchMemories(ctx context.Context, store Store, query string, typ Type, li
 	if err != nil {
 		return nil, err
 	}
-	memories := filterMemories(store.List(), typ)
+	memories := filterMemories(store.List(), typ, scope)
 	docs := make([]memoryDoc, 0, len(memories))
 	for _, m := range memories {
 		if err := ctx.Err(); err != nil {
@@ -182,13 +188,25 @@ func recallTypeFilter(s string) (Type, error) {
 	return t, nil
 }
 
-func filterMemories(memories []Memory, typ Type) []Memory {
-	if typ == "" {
+func recallScopeFilter(s string) (FactScope, error) {
+	if strings.TrimSpace(s) == "" {
+		return "", nil
+	}
+	scope := FactScope(strings.ToLower(strings.TrimSpace(s)))
+	if scope != FactScopeProject && scope != FactScopeGlobal {
+		return "", fmt.Errorf("scope must be one of project, global")
+	}
+	return scope, nil
+}
+
+func filterMemories(memories []Memory, typ Type, scope FactScope) []Memory {
+	if typ == "" && scope == "" {
 		return memories
 	}
 	out := memories[:0]
 	for _, m := range memories {
-		if NormalizeType(string(m.Type)) == typ {
+		if (typ == "" || NormalizeType(string(m.Type)) == typ) &&
+			(scope == "" || NormalizeFactScope(string(m.Scope)) == scope) {
 			out = append(out, m)
 		}
 	}
@@ -205,6 +223,9 @@ func readMemoryByName(store Store, name string) (Memory, bool) {
 		return Memory{}, false
 	}
 	m.Name = name
+	if m.Scope == "" {
+		m.Scope = store.scopeForPath(store.Path(name))
+	}
 	return m, true
 }
 
@@ -213,6 +234,7 @@ func memorySearchText(m Memory) string {
 		m.Name,
 		m.Title,
 		string(NormalizeType(string(m.Type))),
+		string(NormalizeFactScope(string(m.Scope))),
 		m.Description,
 		m.Body,
 	}, "\n")
@@ -233,8 +255,8 @@ func formatMemoryHits(query string, hits []memoryHit) string {
 	fmt.Fprintf(&b, "Memory search results for %s:\n", strconvQuote(query))
 	for i, hit := range hits {
 		m := hit.Memory
-		fmt.Fprintf(&b, "\n%d. score=%.3f name=%s type=%s title=%s\n   description: %s\n   path: %s\n   snippet: %s\n",
-			i+1, hit.Score, m.Name, NormalizeType(string(m.Type)), displayTitle(m.Title, m.Name), oneLine(m.Description), hit.Path, hit.Snippet)
+		fmt.Fprintf(&b, "\n%d. score=%.3f name=%s scope=%s type=%s title=%s\n   description: %s\n   path: %s\n   snippet: %s\n",
+			i+1, hit.Score, m.Name, NormalizeFactScope(string(m.Scope)), NormalizeType(string(m.Type)), displayTitle(m.Title, m.Name), oneLine(m.Description), hit.Path, hit.Snippet)
 	}
 	b.WriteString("\nUse operation=\"read\" with a memory name to inspect the full saved fact.")
 	return strings.TrimSpace(b.String())
@@ -244,6 +266,7 @@ func formatMemory(store Store, m Memory) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Memory %s\n", m.Name)
 	fmt.Fprintf(&b, "title: %s\n", displayTitle(m.Title, m.Name))
+	fmt.Fprintf(&b, "scope: %s\n", NormalizeFactScope(string(m.Scope)))
 	fmt.Fprintf(&b, "type: %s\n", NormalizeType(string(m.Type)))
 	if desc := oneLine(m.Description); desc != "" {
 		fmt.Fprintf(&b, "description: %s\n", desc)
@@ -262,8 +285,8 @@ func formatMemoryList(store Store, memories []Memory, limit int) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Saved memories in %s:\n", store.Dir)
 	for _, m := range memories {
-		fmt.Fprintf(&b, "- [%s](%s.md) type=%s - %s\n",
-			displayTitle(m.Title, m.Name), m.Name, NormalizeType(string(m.Type)), oneLine(m.Description))
+		fmt.Fprintf(&b, "- [%s](%s.md) scope=%s type=%s - %s\n",
+			displayTitle(m.Title, m.Name), m.Name, NormalizeFactScope(string(m.Scope)), NormalizeType(string(m.Type)), oneLine(m.Description))
 	}
 	return strings.TrimSpace(b.String())
 }
