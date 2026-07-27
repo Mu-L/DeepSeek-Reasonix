@@ -249,8 +249,15 @@ Gateway、HuggingFace Router、NVIDIA NIM、KiloCode 和 Ollama Cloud。Plan 表
 `config.toml` 只保存端点、模型列表、key 环境变量名、上下文窗口、视觉模型元数据、
 中国区端点直连、MiniMax `reasoning_split`、GLM/MiniMax thinking heuristic、
 Anthropic-compatible 网关需要的 Bearer 认证、Ollama Cloud max-effort 支持，
-以及 OpenCode Go 的每模型 reasoning 覆盖。添加后仍然可以打开 provider 卡片，
-继续修改模型、请求头、端点或兼容设置。
+以及 OpenCode Go 的每模型 reasoning 覆盖。OpenCode Go 预设原生包含订阅线路的
+`kimi-k3`，并配置图像输入、`high`/`max` 推理强度和 1,048,576 token 上下文窗口。未修改过
+模型目录的既有 OpenCode Go 预设会自动升级；用户编辑过的模型目录保持不变。
+Kimi CN 和 Kimi Global 直连 API 预设也包含 `kimi-k3`，支持图像输入、1,048,576 token
+上下文窗口以及官方 `low`/`high`/`max` 推理强度（默认 `max`）。对官方 K3 端点，Reasonix
+会在多轮请求中保留完整 assistant message，使用 `max_completion_tokens` 传递输出上限，
+并省略 K3 的固定采样参数。未修改过的旧版 Kimi 直连模型目录会自动升级且不会改变默认模型；
+自定义模型目录和端点保持不变。添加后仍然可以打开 provider 卡片，继续修改模型、请求头、
+端点或兼容设置。
 
 **API 地址** 填写服务端点。默认模式下，Reasonix 会预览并把聊天请求发送到：
 

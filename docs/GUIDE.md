@@ -284,9 +284,19 @@ usually needs only the provider API key: the key value is stored in Reasonix hom
 environment-variable name, context window, vision model metadata, proxy bypass
 for China-only endpoints, MiniMax `reasoning_split`, GLM/MiniMax thinking
 heuristics, Anthropic-compatible Bearer auth where needed, Ollama Cloud
-max-effort support, and OpenCode Go per-model reasoning overrides. After adding
-a preset, open its provider card if you need to change models, headers,
-endpoint, or compatibility settings.
+max-effort support, and OpenCode Go per-model reasoning overrides. The OpenCode
+Go preset includes its native `kimi-k3` subscription route with image input,
+`high`/`max` reasoning effort, and a 1,048,576-token context window. Existing untouched
+OpenCode Go preset installs are upgraded automatically; edited model catalogs
+are preserved. The Kimi CN and Kimi Global direct-API presets also include
+`kimi-k3` with image input, a 1,048,576-token context window, and the official
+`low`/`high`/`max` effort scale (default `max`). For the official K3 endpoints,
+Reasonix preserves complete assistant messages across turns, sends output limits
+as `max_completion_tokens`, and omits K3's fixed sampling parameters. Untouched
+legacy Kimi direct-API catalogs are upgraded automatically without changing the
+default model; custom catalogs and endpoints are preserved. After adding a
+preset, open its provider card if you need to change models, headers, endpoint,
+or compatibility settings.
 
 Fill **API address** with the provider endpoint that should receive the standard
 chat path. In this mode Reasonix previews and sends chat requests to:
