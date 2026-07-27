@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -119,6 +121,16 @@ func TestResolveProviderSnapshotAliases(t *testing.T) {
 	}
 	if _, err := resolveProviderSnapshotAliases(plan, nil); err == nil {
 		t.Fatal("unknown snapshot alias was accepted")
+	}
+}
+
+func TestApplyPlanRejectsStalePreviewIDBeforeConfirmation(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "plan.json")
+	if err := os.WriteFile(file, []byte(`{"schemaVersion":1,"summary":"rebuild tabs","actions":[{"type":"rebuild_derived_state","target":"tabs","reason":"malformed"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := runApplyPlan([]string{"--file", file, "--preview-id", "stale", "--yes"}); got != 1 {
+		t.Fatalf("exit code = %d, want stale preview refusal", got)
 	}
 }
 

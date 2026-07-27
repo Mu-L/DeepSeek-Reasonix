@@ -42,6 +42,33 @@ func TestDecodeRepairPlanAllowsNoOpPlan(t *testing.T) {
 	}
 }
 
+func TestRepairPlanIDsBindPlanAndPreviewContent(t *testing.T) {
+	plan := RepairPlan{SchemaVersion: 1, Summary: "repair tabs", Actions: []RepairPlanAction{{Type: "rebuild_derived_state", Target: "tabs", Reason: "malformed"}}}
+	preview := []RepairPlanPreview{{Index: 1, Type: "rebuild_derived_state", Description: "Quarantine and rebuild derived desktop state: tabs"}}
+	if got := RepairPlanID(plan); got != RepairPlanID(plan) || got == "" {
+		t.Fatalf("plan ID is not stable: %q", got)
+	}
+	previewID := RepairPlanPreviewID(plan, preview)
+	changedPlan := plan
+	changedPlan.Actions = []RepairPlanAction{{Type: "rebuild_derived_state", Target: "window", Reason: "malformed"}}
+	if previewID == RepairPlanPreviewID(changedPlan, preview) {
+		t.Fatal("changing the action did not change the preview ID")
+	}
+	changedPreview := append([]RepairPlanPreview(nil), preview...)
+	changedPreview[0].Description = "changed preview"
+	if previewID == RepairPlanPreviewID(plan, changedPreview) {
+		t.Fatal("changing the preview did not change the preview ID")
+	}
+}
+
+func TestApplyRepairPlanRejectsUnboundPreview(t *testing.T) {
+	plan := RepairPlan{SchemaVersion: 1, Summary: "tabs", Actions: []RepairPlanAction{{Type: "rebuild_derived_state", Target: "tabs", Reason: "malformed"}}}
+	_, err := ApplyRepairPlan(plan, ApplyPlanOptions{Root: t.TempDir(), ExpectedPreviewID: "stale"})
+	if err == nil || !strings.Contains(err.Error(), "preview changed since confirmation") {
+		t.Fatalf("error = %v, want stale preview refusal", err)
+	}
+}
+
 func TestProjectRepairPlanRequiresExplicitPermission(t *testing.T) {
 	plan := RepairPlan{SchemaVersion: 1, Summary: "project", Actions: []RepairPlanAction{{Type: "repair_config", Scope: "project", Reason: "bad toml"}}}
 	if _, err := PreviewRepairPlan(plan, ApplyPlanOptions{Root: t.TempDir()}); err == nil || !strings.Contains(err.Error(), "--allow-project") {

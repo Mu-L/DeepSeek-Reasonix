@@ -17,7 +17,7 @@ reasonix-guard undo [--json]
 reasonix-guard launch [--app PATH] [--safe-mode] [--detach]
 reasonix-guard recover [--root PATH] [--project]
 reasonix-guard assist [--model PROVIDER/MODEL] [--apply] [--allow-project]
-reasonix-guard apply-plan --file PLAN.json [--yes] [--allow-project]
+reasonix-guard apply-plan --file PLAN.json [--preview-id ID] [--yes] [--allow-project]
 reasonix doctor repair [--root PATH] [--apply] [--project] [--json]
 ```
 
@@ -106,6 +106,11 @@ verified snapshot restore, derived-state rebuild, and pending-update rollback.
 The host displays an operation preview and unified configuration diff, asks for
 confirmation, and executes only those built-in operations. A plan cannot run a
 shell command, edit credentials or session content, or name an arbitrary path.
+Machine-readable assist output includes a `planId` and a `previewId`. Hosts
+that confirm a dry-run later must pass the same `previewId` to `apply-plan`;
+the guard re-computes the preview before writing and refuses when the plan,
+action list, or filesystem-derived diff changed. A bare `--yes` is only
+accepted after binding to the preview generated for that same apply invocation.
 
 All state files are additive and optional. Older Reasonix releases ignore them;
 missing new fields decode to their safe zero values.

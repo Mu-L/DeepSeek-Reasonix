@@ -2,6 +2,8 @@ package repair
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -37,9 +39,40 @@ type RepairPlanPreview struct {
 	Diff        string `json:"diff,omitempty"`
 }
 
+// RepairPlanID identifies the canonical plan content without trusting an ID
+// supplied by a caller. It changes when the summary, action list, or any
+// action field changes.
+func RepairPlanID(plan RepairPlan) string {
+	canonical := struct {
+		SchemaVersion int                `json:"schemaVersion"`
+		Summary       string             `json:"summary"`
+		Actions       []RepairPlanAction `json:"actions"`
+	}{plan.SchemaVersion, plan.Summary, plan.Actions}
+	b, _ := json.Marshal(canonical)
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+// RepairPlanPreviewID binds a plan to the exact preview shown to the user.
+// This includes the current filesystem-derived descriptions and diffs, so a
+// changed file or action set cannot reuse an earlier confirmation.
+func RepairPlanPreviewID(plan RepairPlan, previews []RepairPlanPreview) string {
+	canonical := struct {
+		PlanID  string              `json:"planId"`
+		Preview []RepairPlanPreview `json:"preview"`
+	}{RepairPlanID(plan), previews}
+	b, _ := json.Marshal(canonical)
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
 type ApplyPlanOptions struct {
 	Root         string
 	AllowProject bool
+	// ExpectedPreviewID binds application to the preview that was confirmed.
+	// Empty preserves direct package callers that do not model an approval
+	// boundary; CLI confirmation paths always populate it.
+	ExpectedPreviewID string
 }
 
 type ApplyPlanResult struct {
@@ -185,8 +218,15 @@ func PreviewRepairPlan(plan RepairPlan, opts ApplyPlanOptions) ([]RepairPlanPrev
 }
 
 func ApplyRepairPlan(plan RepairPlan, opts ApplyPlanOptions) (ApplyPlanResult, error) {
-	if _, err := PreviewRepairPlan(plan, opts); err != nil {
+	preview, err := PreviewRepairPlan(plan, opts)
+	if err != nil {
 		return ApplyPlanResult{Applied: []string{}}, err
+	}
+	if expected := strings.TrimSpace(opts.ExpectedPreviewID); expected != "" {
+		actual := RepairPlanPreviewID(plan, preview)
+		if expected != actual {
+			return ApplyPlanResult{Applied: []string{}}, fmt.Errorf("repair plan preview changed since confirmation; re-preview and re-confirm (expected %s, got %s)", expected, actual)
+		}
 	}
 	result := ApplyPlanResult{Applied: []string{}}
 	// Each action records its own transaction in last-repair.json, so a
