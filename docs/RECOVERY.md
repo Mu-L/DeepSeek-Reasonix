@@ -109,8 +109,12 @@ shell command, edit credentials or session content, or name an arbitrary path.
 Machine-readable assist output includes a `planId` and a `previewId`. Hosts
 that confirm a dry-run later must pass the same `previewId` to `apply-plan`;
 the guard re-computes the preview before writing and refuses when the plan,
-action list, or filesystem-derived diff changed. A bare `--yes` is only
-accepted after binding to the preview generated for that same apply invocation.
+action list, filesystem-derived diff, derived-state input, or pending-update
+transaction changed. Non-interactive `apply-plan --yes` requires
+`--preview-id`; interactive confirmation binds the preview displayed in that
+same invocation. Direct package callers that own their own approval boundary
+remain source compatible and can opt into the same check with
+`ApplyPlanOptions.ExpectedPreviewID`.
 
 All state files are additive and optional. Older Reasonix releases ignore them;
 missing new fields decode to their safe zero values.

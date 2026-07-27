@@ -113,8 +113,13 @@ func runApplyPlan(args []string) int {
 		printPlanPreview(plan, preview)
 	}
 	actualPreviewID := repair.RepairPlanPreviewID(plan, preview)
-	if expected := strings.TrimSpace(*previewID); expected != "" && expected != actualPreviewID {
-		fmt.Fprintf(os.Stderr, "error: repair plan preview changed since confirmation; re-preview and re-confirm (expected %s, got %s)\n", expected, actualPreviewID)
+	expectedPreviewID := strings.TrimSpace(*previewID)
+	if *yes && expectedPreviewID == "" {
+		fmt.Fprintln(os.Stderr, "error: --preview-id is required with --yes; preview the plan and confirm its current previewId first")
+		return 2
+	}
+	if expectedPreviewID != "" && expectedPreviewID != actualPreviewID {
+		fmt.Fprintf(os.Stderr, "error: repair plan preview changed since confirmation; re-preview and re-confirm (expected %s, got %s)\n", expectedPreviewID, actualPreviewID)
 		return 1
 	}
 	if !*yes && !confirmPlan() {

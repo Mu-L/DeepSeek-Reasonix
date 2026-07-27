@@ -149,13 +149,78 @@ func TestResolveProviderSnapshotAliases(t *testing.T) {
 	}
 }
 
-func TestApplyPlanRejectsStalePreviewIDBeforeConfirmation(t *testing.T) {
+func writeDerivedStatePlan(t *testing.T) (string, repair.RepairPlan) {
+	t.Helper()
 	file := filepath.Join(t.TempDir(), "plan.json")
-	if err := os.WriteFile(file, []byte(`{"schemaVersion":1,"summary":"rebuild tabs","actions":[{"type":"rebuild_derived_state","target":"tabs","reason":"malformed"}]}`), 0o600); err != nil {
+	raw := []byte(`{"schemaVersion":1,"summary":"rebuild tabs","actions":[{"type":"rebuild_derived_state","target":"tabs","reason":"malformed"}]}`)
+	if err := os.WriteFile(file, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got := runApplyPlan([]string{"--file", file, "--preview-id", "stale", "--yes"}); got != 1 {
+	plan, err := repair.DecodeRepairPlan(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return file, plan
+}
+
+func TestApplyPlanYesRequiresConfirmedPreviewID(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("REASONIX_HOME", home)
+	tabs := filepath.Join(home, "desktop-tabs.json")
+	if err := os.WriteFile(tabs, []byte("bad-tabs"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	file, _ := writeDerivedStatePlan(t)
+	if got := runApplyPlan([]string{"--file", file, "--yes"}); got != 2 {
+		t.Fatalf("exit code = %d, want missing preview ID usage refusal", got)
+	}
+	if got, err := os.ReadFile(tabs); err != nil || string(got) != "bad-tabs" {
+		t.Fatalf("unbound --yes touched derived state: %q, %v", got, err)
+	}
+}
+
+func TestApplyPlanRejectsStateChangedAfterPreview(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("REASONIX_HOME", home)
+	tabs := filepath.Join(home, "desktop-tabs.json")
+	if err := os.WriteFile(tabs, []byte("first-state"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	file, plan := writeDerivedStatePlan(t)
+	preview, err := repair.PreviewRepairPlan(plan, repair.ApplyPlanOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	previewID := repair.RepairPlanPreviewID(plan, preview)
+	if err := os.WriteFile(tabs, []byte("changed-after-preview"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := runApplyPlan([]string{"--file", file, "--preview-id", previewID, "--yes"}); got != 1 {
 		t.Fatalf("exit code = %d, want stale preview refusal", got)
+	}
+	if got, err := os.ReadFile(tabs); err != nil || string(got) != "changed-after-preview" {
+		t.Fatalf("stale preview touched derived state: %q, %v", got, err)
+	}
+}
+
+func TestApplyPlanAcceptsCurrentConfirmedPreviewID(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("REASONIX_HOME", home)
+	tabs := filepath.Join(home, "desktop-tabs.json")
+	if err := os.WriteFile(tabs, []byte("bad-tabs"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	file, plan := writeDerivedStatePlan(t)
+	preview, err := repair.PreviewRepairPlan(plan, repair.ApplyPlanOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	previewID := repair.RepairPlanPreviewID(plan, preview)
+	if got := runApplyPlan([]string{"--file", file, "--preview-id", previewID, "--yes"}); got != 0 {
+		t.Fatalf("exit code = %d, want confirmed preview application", got)
+	}
+	if _, err := os.Stat(tabs); !os.IsNotExist(err) {
+		t.Fatalf("confirmed repair did not quarantine derived state: %v", err)
 	}
 }
 

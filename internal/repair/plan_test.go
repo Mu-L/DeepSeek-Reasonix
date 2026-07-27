@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDecodeRepairPlanRejectsUnknownFieldsAndActions(t *testing.T) {
@@ -62,10 +63,93 @@ func TestRepairPlanIDsBindPlanAndPreviewContent(t *testing.T) {
 }
 
 func TestApplyRepairPlanRejectsUnboundPreview(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("REASONIX_HOME", home)
+	tabs := filepath.Join(home, "desktop-tabs.json")
+	if err := os.WriteFile(tabs, []byte("first-state"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	plan := RepairPlan{SchemaVersion: 1, Summary: "tabs", Actions: []RepairPlanAction{{Type: "rebuild_derived_state", Target: "tabs", Reason: "malformed"}}}
-	_, err := ApplyRepairPlan(plan, ApplyPlanOptions{Root: t.TempDir(), ExpectedPreviewID: "stale"})
+	preview, err := PreviewRepairPlan(plan, ApplyPlanOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := RepairPlanPreviewID(plan, preview)
+	if err := os.WriteFile(tabs, []byte("changed-after-preview"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = ApplyRepairPlan(plan, ApplyPlanOptions{ExpectedPreviewID: expected})
 	if err == nil || !strings.Contains(err.Error(), "preview changed since confirmation") {
 		t.Fatalf("error = %v, want stale preview refusal", err)
+	}
+	if got, readErr := os.ReadFile(tabs); readErr != nil || string(got) != "changed-after-preview" {
+		t.Fatalf("stale preview touched derived state: %q, %v", got, readErr)
+	}
+}
+
+func TestApplyRepairPlanRechecksPreviewBeforeEachAction(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("REASONIX_HOME", home)
+	tabs := filepath.Join(home, "desktop-tabs.json")
+	if err := os.WriteFile(tabs, []byte("bad-tabs"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	plan := RepairPlan{SchemaVersion: 1, Summary: "rebuild tabs twice", Actions: []RepairPlanAction{
+		{Type: "rebuild_derived_state", Target: "tabs", Reason: "malformed"},
+		{Type: "rebuild_derived_state", Target: "tabs", Reason: "malformed"},
+	}}
+	preview, err := PreviewRepairPlan(plan, ApplyPlanOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := ApplyRepairPlan(plan, ApplyPlanOptions{ExpectedPreviewID: RepairPlanPreviewID(plan, preview)})
+	if err == nil || !strings.Contains(err.Error(), "action 2: repair plan preview changed") {
+		t.Fatalf("error = %v, want second-action stale preview refusal", err)
+	}
+	if len(result.Applied) != 1 {
+		t.Fatalf("applied = %v, want only the confirmed first action", result.Applied)
+	}
+	if _, statErr := os.Stat(tabs); !os.IsNotExist(statErr) {
+		t.Fatalf("second action unexpectedly restored or rewrote tabs: %v", statErr)
+	}
+}
+
+func TestApplyRepairPlanBindsPendingUpdateTransactionIdentity(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("REASONIX_HOME", home)
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "reasonix-desktop")
+	originalExecutable := repairExecutable
+	repairExecutable = func() (string, error) { return filepath.Join(dir, "reasonix-guard"), nil }
+	t.Cleanup(func() { repairExecutable = originalExecutable })
+	if err := os.WriteFile(target, []byte("old"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := PrepareFileUpdate("v1", "v2", target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte("new"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	plan := RepairPlan{SchemaVersion: 1, Summary: "rollback", Actions: []RepairPlanAction{{Type: "rollback_update", Reason: "failed update"}}}
+	preview, err := PreviewRepairPlan(plan, ApplyPlanOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := RepairPlanPreviewID(plan, preview)
+	tx.CreatedAt = time.Now().Add(time.Second).UTC().Format(time.RFC3339Nano)
+	if err := WritePendingUpdate(tx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ApplyRepairPlan(plan, ApplyPlanOptions{ExpectedPreviewID: expected}); err == nil || !strings.Contains(err.Error(), "preview changed since confirmation") {
+		t.Fatalf("error = %v, want changed transaction refusal", err)
+	}
+	if got, err := os.ReadFile(target); err != nil || string(got) != "new" {
+		t.Fatalf("stale rollback touched target: %q, %v", got, err)
 	}
 }
 

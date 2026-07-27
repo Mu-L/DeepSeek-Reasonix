@@ -17,7 +17,7 @@ reasonix-guard undo [--json]
 reasonix-guard launch [--app PATH] [--safe-mode] [--detach]
 reasonix-guard recover [--root PATH] [--project]
 reasonix-guard assist [--model PROVIDER/MODEL] [--apply] [--allow-project]
-reasonix-guard apply-plan --file PLAN.json [--yes] [--allow-project]
+reasonix-guard apply-plan --file PLAN.json [--preview-id ID] [--yes] [--allow-project]
 reasonix doctor repair [--root PATH] [--apply] [--project] [--json]
 ```
 
@@ -83,6 +83,13 @@ Guard/启动器二进制，或整个应用 Bundle（macOS）。只有新版本�
 仅包括：隔离配置、恢复已校验快照、重建派生状态、回滚待确认更新。Host 会先展示操作
 预览和配置统一 diff，再要求用户确认。计划不能运行 shell、修改凭据或会话正文，也不能
 指定任意文件路径。
+
+机器可读的 `assist` 输出包含 `planId` 和 `previewId`。Host 在 dry-run 后延迟确认时，
+必须把同一个 `previewId` 传给 `apply-plan`；Guard 会在写入前重新计算预览，并在计划、
+动作列表、文件 diff、派生状态输入或待回滚更新事务发生变化时拒绝执行。非交互式
+`apply-plan --yes` 必须同时提供 `--preview-id`；交互式确认则自动绑定同一次调用中展示
+的预览。自行管理确认边界的 Go 包调用方保持源码兼容，并可通过
+`ApplyPlanOptions.ExpectedPreviewID` 启用相同校验。
 
 所有新增状态文件都是可选且向后兼容的；旧版 Reasonix 会直接忽略，缺失新字段时按安全
 零值处理。
