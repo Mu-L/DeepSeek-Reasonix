@@ -95,7 +95,18 @@ Fact category and reach are separate fields:
 - `scope` is `project` or `global` and can independently filter search/list;
 - a new fact defaults to project scope, while global scope must be explicit;
 - a legacy file without `metadata.scope` derives its scope from its containing
-  project/global directory without requiring a rewrite.
+  project/global directory without requiring a rewrite;
+- an update that omits scope inherits the active same-name fact's effective
+  scope, while an explicit scope still moves it intentionally;
+- route-compatible `metadata.type` plus authoritative `metadata.fact_type`
+  keeps the file in the correct directory when a previous release shares the
+  state root.
+
+At session load, globally scoped `user` and `feedback` bodies are snapshotted in
+name order into a lower-priority global-guidance section of the stable prefix.
+This preserves first-turn behavior for global preferences and working feedback,
+including legacy files without `metadata.scope`, while current user requests and
+instruction files remain authoritative. Other fact bodies stay retrieval-only.
 
 The searchable text combines:
 

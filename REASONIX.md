@@ -28,7 +28,8 @@ agent. It is the Reasonix analog of Claude Code's CLAUDE.md.
   instead saves a fallible background fact (frontmatter file + `MEMORY.md`
   index). Fact `type` classifies content; independent `scope` controls whether it
   is project-only (the default) or explicitly global. The index loads into the
-  stable prefix on the next session; the current turn receives a tail note.
+  stable prefix on the next session; global user/feedback bodies also load as
+  lower-priority compatibility guidance. The current turn receives a tail note.
 
 ## Notes
 

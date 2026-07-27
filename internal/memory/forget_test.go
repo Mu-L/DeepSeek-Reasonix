@@ -61,7 +61,8 @@ func TestForgetToolQueuesDisregardNote(t *testing.T) {
 	if _, err := NewForgetTool(store).Execute(ctx, []byte(`{"name":"old-fact"}`)); err != nil {
 		t.Fatal(err)
 	}
-	if len(q.notes) != 1 || !strings.Contains(q.notes[0], "old-fact") {
-		t.Fatalf("expected one queued note naming the deleted memory, got %v", q.notes)
+	if len(q.notes) != 1 || !strings.Contains(q.notes[0], "old-fact") ||
+		!strings.Contains(q.notes[0], "disregard its loaded guidance") {
+		t.Fatalf("expected one queued note revoking the deleted memory, got %v", q.notes)
 	}
 }

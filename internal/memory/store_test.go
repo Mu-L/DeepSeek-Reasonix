@@ -60,9 +60,9 @@ func TestRenderEscapesYAMLMetacharacters(t *testing.T) {
 	}
 }
 
-// TestRenderPlainValuesKeepLegacyBytes pins the existing YAML layout while
-// adding the explicit scope field. Read-only discovery does not rewrite files.
-func TestRenderPlainValuesKeepLegacyBytes(t *testing.T) {
+// TestRenderPlainValuesUsesPreviousReleaseRoutingType keeps project scope safe
+// when an older binary reads a project-scoped user preference.
+func TestRenderPlainValuesUsesPreviousReleaseRoutingType(t *testing.T) {
 	got := render(Memory{
 		Title:       "Prefers tabs",
 		Description: "User prefers tabs over spaces",
@@ -74,12 +74,35 @@ func TestRenderPlainValuesKeepLegacyBytes(t *testing.T) {
 		"title: Prefers tabs\n" +
 		"description: User prefers tabs over spaces\n" +
 		"metadata:\n" +
-		"  type: user\n" +
+		"  type: project\n" +
+		"  fact_type: user\n" +
 		"  scope: project\n" +
 		"---\n\n" +
 		"Always indent with tabs.\n"
 	if got != want {
 		t.Fatalf("plain-value render changed bytes:\ngot:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestRenderKeepsPreviousReleaseRoutingScopeSafe(t *testing.T) {
+	for _, scope := range []FactScope{FactScopeProject, FactScopeGlobal} {
+		for _, typ := range []Type{TypeUser, TypeFeedback, TypeProject, TypeReference} {
+			label := string(scope) + "-" + string(typ)
+			t.Run(label, func(t *testing.T) {
+				fm, _ := splitFrontmatter(render(Memory{Description: "d", Type: typ, Scope: scope, Body: "b"}, label))
+				if got := persistedFactType(fm); got != typ {
+					t.Fatalf("new reader type = %q, want %q; frontmatter=%v", got, typ, fm)
+				}
+				legacyType := NormalizeType(fm["type"])
+				legacyRoutesGlobal := legacyType == TypeUser || legacyType == TypeFeedback
+				if wantGlobal := scope == FactScopeGlobal; legacyRoutesGlobal != wantGlobal {
+					t.Fatalf("previous release type %q routes global=%v, want %v; frontmatter=%v", legacyType, legacyRoutesGlobal, wantGlobal, fm)
+				}
+				if got := factScopeFromFrontmatter(fm["scope"]); got != scope {
+					t.Fatalf("new reader scope = %q, want %q", got, scope)
+				}
+			})
+		}
 	}
 }
 
@@ -655,6 +678,25 @@ func TestStoreDefaultsNewMemoriesToProjectScope(t *testing.T) {
 	list := s.List()
 	if len(list) != 1 || list[0].Scope != FactScopeProject {
 		t.Fatalf("default memory = %+v, want project scope", list)
+	}
+}
+
+func TestStoreSaveWithoutScopePreservesExistingGlobalScope(t *testing.T) {
+	dir := t.TempDir()
+	s := Store{Dir: filepath.Join(dir, "project"), GlobalDir: filepath.Join(dir, "global")}
+	globalPath, err := s.Save(Memory{Name: "same-name", Description: "old", Type: TypeUser, Scope: FactScopeGlobal, Body: "old body"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	written, err := s.Save(Memory{Name: "same-name", Description: "new", Type: TypeUser, Body: "new body"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if written != globalPath {
+		t.Fatalf("omitted-scope update path = %q, want existing global path %q", written, globalPath)
+	}
+	if _, err := os.Stat(filepath.Join(s.Dir, "same-name.md")); !os.IsNotExist(err) {
+		t.Fatalf("unexpected project copy after inherited update, stat err=%v", err)
 	}
 }
 

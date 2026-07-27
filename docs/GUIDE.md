@@ -807,19 +807,26 @@ Skill file format, model precedence, safety behavior, and troubleshooting.
   in context and are the right place for rules the agent must always follow.
 - **Background memory** is a set of one-fact Markdown files maintained through
   `remember` and `forget`. Facts may be stale, so the agent retrieves and checks
-  them when relevant rather than treating them as commands.
+  them when relevant rather than treating them as commands. For upgrade
+  compatibility, globally scoped `user` preferences and `feedback` bodies are
+  also captured in the stable session prefix as lower-priority guidance. The
+  current request and instruction files still take precedence.
 
 Each background fact has an independent `type` (`user`, `feedback`, `project`,
 or `reference`) and `scope` (`project` or `global`). New facts default to
 `project`; `global` must be chosen explicitly. This means, for example, that
 project-specific feedback remains local even though its type is `feedback`.
 Legacy facts without `metadata.scope` remain compatible: Reasonix infers their
-scope from the project or global directory that contains them.
+scope from the project or global directory that contains them. Reusing a memory
+name without passing `scope` preserves that inferred scope; only new facts use
+the project default. The compatibility routing metadata also keeps mixed-version
+CLI/Desktop clients from moving a fact into the wrong scope directory.
 
 During agent turns, the read-only `history` and `memory`
 tools let the model retrieve prior session decisions, compacted-history
-archives, and saved facts on demand instead of injecting that dynamic state into
-the stable system prompt. `/forget <name>` archives a saved fact rather than
+archives, and saved facts on demand. Apart from the stable global preference and
+feedback compatibility snapshot described above, fact bodies stay out of the
+system prompt until retrieved. `/forget <name>` archives a saved fact rather than
 deleting it permanently; the CLI/TUI and desktop memory panel can show those
 archived files for traceability, but they are not searched as active memory.
 Agent-initiated `remember` and `forget` calls always ask for fresh human approval

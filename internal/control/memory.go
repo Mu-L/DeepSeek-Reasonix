@@ -134,7 +134,7 @@ func (m *memoryManager) saveMemory(fact memory.Memory) (string, error) {
 		return "", err
 	}
 	m.applyWrite(mem,
-		"Saved memory \""+fact.Name+"\": "+strings.Join(strings.Fields(fact.Description), " "))
+		"Saved memory \""+fact.Name+"\": "+strings.Join(strings.Fields(fact.Description), " ")+"\n"+strings.TrimSpace(fact.Body))
 	return path, nil
 }
 
@@ -154,7 +154,7 @@ func (m *memoryManager) forget(name string) error {
 		return err
 	}
 	m.applyWrite(mem,
-		"Forgot memory \""+name+"\" — disregard its line still shown in the saved-memories index until next session.")
+		"Forgot memory \""+name+"\" — disregard its loaded guidance and background-index entry for the rest of this session.")
 	return nil
 }
 

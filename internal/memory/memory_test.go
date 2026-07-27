@@ -52,6 +52,54 @@ func TestBlockSeparatesStandingInstructionsFromBackgroundMemory(t *testing.T) {
 	}
 }
 
+func TestLoadIncludesStableGlobalPreferencesAndFeedback(t *testing.T) {
+	root := t.TempDir()
+	user := filepath.Join(root, "user")
+	proj := filepath.Join(root, "project")
+	mustMkdir(t, filepath.Join(proj, ".git"))
+	mustWrite(t, filepath.Join(proj, "AGENTS.md"), "STANDING INSTRUCTION BODY")
+	store := StoreFor(user, proj)
+	if _, err := store.Save(Memory{Name: "alpha-user", Description: "global preference", Type: TypeUser, Scope: FactScopeGlobal, Body: "GLOBAL USER BODY"}); err != nil {
+		t.Fatal(err)
+	}
+	legacyFeedback := "---\nname: zeta-feedback\ndescription: legacy global feedback\nmetadata:\n  type: feedback\n---\n\nGLOBAL FEEDBACK BODY\n"
+	mustWrite(t, filepath.Join(store.GlobalDir, "zeta-feedback.md"), legacyFeedback)
+	if err := reindexIn(store.GlobalDir, "zeta-feedback", Memory{Name: "zeta-feedback", Description: "legacy global feedback", Type: TypeFeedback, Scope: FactScopeGlobal}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Save(Memory{Name: "global-reference", Description: "global reference", Type: TypeReference, Scope: FactScopeGlobal, Body: "GLOBAL REFERENCE BODY"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Save(Memory{Name: "project-feedback", Description: "project feedback", Type: TypeFeedback, Scope: FactScopeProject, Body: "PROJECT FEEDBACK BODY"}); err != nil {
+		t.Fatal(err)
+	}
+
+	set := Load(Options{CWD: proj, UserDir: user})
+	if len(set.GlobalGuidance) != 2 {
+		t.Fatalf("global guidance = %+v, want user + feedback only", set.GlobalGuidance)
+	}
+	block := set.Block()
+	for _, want := range []string{"## Global preferences and feedback", "GLOBAL USER BODY", "GLOBAL FEEDBACK BODY"} {
+		if !strings.Contains(block, want) {
+			t.Fatalf("Block() missing %q:\n%s", want, block)
+		}
+	}
+	for _, excluded := range []string{"GLOBAL REFERENCE BODY", "PROJECT FEEDBACK BODY"} {
+		if strings.Contains(block, excluded) {
+			t.Fatalf("Block() promoted non-guidance body %q:\n%s", excluded, block)
+		}
+	}
+	if strings.Index(block, "GLOBAL USER BODY") > strings.Index(block, "GLOBAL FEEDBACK BODY") {
+		t.Fatalf("global guidance is not deterministically sorted by name:\n%s", block)
+	}
+	if strings.Index(block, "## Global preferences and feedback") > strings.Index(block, "## Standing instructions") && strings.Contains(block, "## Standing instructions") {
+		t.Fatalf("lower-priority global guidance must precede standing instructions:\n%s", block)
+	}
+	if again := set.Block(); again != block {
+		t.Fatal("unchanged memory snapshot produced unstable prompt bytes")
+	}
+}
+
 // TestDiscoverPrecedenceOrder checks user → ancestor → project → local ordering,
 // which puts the most specific guidance last.
 func TestDiscoverPrecedenceOrder(t *testing.T) {

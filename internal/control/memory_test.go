@@ -3,6 +3,7 @@ package control
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -41,6 +42,72 @@ func TestMemoryWriteReflectsInSnapshot(t *testing.T) {
 	}
 	if after == before {
 		t.Fatal("Memory() returned the stale snapshot; the manager did not swap in a reload")
+	}
+}
+
+func TestSaveMemoryQueuesFullBodyForCurrentSession(t *testing.T) {
+	root := t.TempDir()
+	userDir := filepath.Join(root, "user")
+	cwd := filepath.Join(root, "project")
+	if err := os.MkdirAll(cwd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	c := New(Options{Memory: memory.Load(memory.Options{CWD: cwd, UserDir: userDir})})
+
+	body := "Always answer in Chinese unless the user explicitly asks for English.\nKeep technical terms precise."
+	if _, err := c.SaveMemory(memory.Memory{
+		Name:        "response-language",
+		Description: "preferred response language",
+		Type:        memory.TypeUser,
+		Scope:       memory.FactScopeGlobal,
+		Body:        body,
+	}); err != nil {
+		t.Fatalf("SaveMemory: %v", err)
+	}
+
+	composed := c.Compose("hello")
+	if !strings.Contains(composed, "Saved memory \"response-language\"") || !strings.Contains(composed, body) {
+		t.Fatalf("saved memory name and body should ride the next turn:\n%s", composed)
+	}
+	if again := c.Compose("again"); strings.Contains(again, body) || strings.Contains(again, "<memory-update>") {
+		t.Fatalf("saved memory update should drain after one turn: %q", again)
+	}
+}
+
+func TestForgetMemoryRevokesLoadedGlobalGuidanceForCurrentSession(t *testing.T) {
+	root := t.TempDir()
+	userDir := filepath.Join(root, "user")
+	cwd := filepath.Join(root, "project")
+	if err := os.MkdirAll(cwd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store := memory.StoreFor(userDir, cwd)
+	const body = "Never use emoji in responses."
+	if _, err := store.Save(memory.Memory{
+		Name:        "no-emoji",
+		Description: "avoid emoji",
+		Type:        memory.TypeFeedback,
+		Scope:       memory.FactScopeGlobal,
+		Body:        body,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	c := New(Options{Memory: memory.Load(memory.Options{CWD: cwd, UserDir: userDir})})
+	if before := c.Memory().Block(); !strings.Contains(before, body) {
+		t.Fatalf("test setup did not load global guidance:\n%s", before)
+	}
+
+	if err := c.ForgetMemory("no-emoji"); err != nil {
+		t.Fatalf("ForgetMemory: %v", err)
+	}
+	if after := c.Memory().Block(); strings.Contains(after, body) {
+		t.Fatalf("reloaded snapshot retained forgotten global guidance:\n%s", after)
+	}
+	composed := c.Compose("hello")
+	for _, want := range []string{"Forgot memory \"no-emoji\"", "disregard its loaded guidance", "background-index entry"} {
+		if !strings.Contains(composed, want) {
+			t.Fatalf("forget update missing %q:\n%s", want, composed)
+		}
 	}
 }
 

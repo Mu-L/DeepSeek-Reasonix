@@ -45,7 +45,7 @@ func (rememberTool) Schema() json.RawMessage {
 			"title": {"type": "string", "description": "Short human-readable label shown in the memory index, e.g. \"Prefers tabs\". Omit to derive one from the name."},
 			"description": {"type": "string", "description": "One-line hook shown in the index — the phrase a future session reads to decide whether to open this memory. Make it specific."},
 			"type": {"type": "string", "enum": ["user", "feedback", "project", "reference"], "description": "Category of the fact."},
-			"scope": {"type": "string", "enum": ["project", "global"], "description": "Where the fact applies. Omit for the safe default, project; use global only when it should affect every workspace."},
+			"scope": {"type": "string", "enum": ["project", "global"], "description": "Where the fact applies. For a new fact, omit for the safe default, project. When updating an existing name, omit to preserve its current scope. Use global only when it should affect every workspace."},
 			"body": {"type": "string", "description": "The fact itself (Markdown). For feedback/project, include a \"**Why:**\" line and a \"**How to apply:**\" line; link related memories with [[their-name]]."}
 		},
 		"required": ["description", "body"]
@@ -71,7 +71,7 @@ func (t rememberTool) Execute(ctx context.Context, args json.RawMessage) (string
 	if scope != "" && scope != string(FactScopeProject) && scope != string(FactScopeGlobal) {
 		return "", fmt.Errorf("scope must be one of project, global")
 	}
-	factScope := NormalizeFactScope(scope)
+	factScope := FactScope(scope)
 	name := in.Name
 	if name == "" {
 		name = in.Title // Save slugifies; the title (or, below, the description) makes a serviceable slug
@@ -90,8 +90,13 @@ func (t rememberTool) Execute(ctx context.Context, args json.RawMessage) (string
 	if err != nil {
 		return "", err
 	}
+	if saved, ok := loadMemory(path); ok && saved.Scope != "" {
+		factScope = NormalizeFactScope(string(saved.Scope))
+	} else {
+		factScope = t.store.scopeForPath(path)
+	}
 	if q, ok := QueueFromContext(ctx); ok {
-		q.QueueMemory("Saved memory \"" + slug(name) + "\": " + oneLine(in.Description))
+		q.QueueMemory("Saved memory \"" + slug(name) + "\" (" + string(factScope) + "): " + oneLine(in.Description) + "\n" + strings.TrimSpace(in.Body))
 	}
 	return fmt.Sprintf("Saved memory (%s background) to %s (it applies now and its index loads automatically in future sessions).", factScope, path), nil
 }

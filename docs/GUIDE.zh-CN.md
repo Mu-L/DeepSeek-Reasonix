@@ -654,15 +654,20 @@ custom path 或包含更多手写结构的 Skill，避免丢失 frontmatter、re
 - **常驻指令**来自分层加载的 `REASONIX.md`、`AGENTS.md` 和 `CLAUDE.md`（包括本地与
   用户全局变体）。它们会持续参与上下文，适合存放智能体必须始终遵守的规则。
 - **背景记忆**是由 `remember` / `forget` 管理的单事实 Markdown 文件。事实可能过时，
-  因此智能体只在相关时检索并核验，而不会把它当作命令。
+  因此智能体只在相关时检索并核验，而不会把它当作命令。为兼容升级前的数据，全局作用域的
+  `user` 偏好和 `feedback` 正文还会作为低优先级指导进入稳定会话前缀；当前请求和指令文件
+  始终优先。
 
 每条背景记忆都有相互独立的 `type`（`user`、`feedback`、`project`、`reference`）和
 `scope`（`project`、`global`）。新事实默认是 `project`；只有显式选择才会写成
 `global`。因此，类型为 `feedback` 的项目反馈不会再被自动提升为全局记忆。旧文件若没有
-`metadata.scope` 仍可兼容，Reasonix 会根据它位于项目目录还是全局目录推导作用域。
+`metadata.scope` 仍可兼容，Reasonix 会根据它位于项目目录还是全局目录推导作用域。更新
+同名记忆时若省略 `scope`，会保留推导出的原作用域；只有新事实才使用项目级默认值。兼容
+路由元数据也会避免不同版本的 CLI/桌面端把事实移动到错误的作用域目录。
 
 在 agent 回合中，只读的 `history` 和 `memory` 工具可以按需检索历史 session 决策、
-compaction archive 和已保存事实；这些动态内容不会被塞进稳定的 system prompt 前缀。
+compaction archive 和已保存事实。除上述稳定的全局偏好/反馈兼容快照外，事实正文只有在
+检索后才会进入上下文。
 `/forget <name>` 会把已保存事实归档而不是永久删除；CLI/TUI 和桌面记忆面板能显示归档文件用于追溯，
 但它们不会作为 active memory 被检索。记忆索引以 `[scope/type]` 同时标明两个维度，
 `memory` 工具也可以按任一维度筛选。检索会保留 BM25 最强命中，同时裁掉弱的泛词命中；

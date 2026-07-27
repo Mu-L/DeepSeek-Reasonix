@@ -13,11 +13,12 @@ import (
 // UserDir are retained so the controller can resolve quick-add targets without
 // re-deriving discovery context.
 type Set struct {
-	Docs    []Source // REASONIX.md / AGENTS.md, ascending precedence
-	Store   Store    // auto-memory store (may be a zero/disabled Store)
-	Index   string   // MEMORY.md contents at load time
-	CWD     string   // project working dir used for discovery
-	UserDir string   // user config root (may be "")
+	Docs           []Source // REASONIX.md / AGENTS.md, ascending precedence
+	GlobalGuidance []Memory // stable snapshot of global user/feedback bodies
+	Store          Store    // auto-memory store (may be a zero/disabled Store)
+	Index          string   // MEMORY.md contents at load time
+	CWD            string   // project working dir used for discovery
+	UserDir        string   // user config root (may be "")
 }
 
 // Options configures discovery. CWD defaults to "." and UserDir is the user
@@ -38,11 +39,12 @@ func Load(opts Options) *Set {
 	}
 	store := StoreFor(opts.UserDir, cwd)
 	return &Set{
-		Docs:    discoverDocs(cwd, opts.UserDir),
-		Store:   store,
-		Index:   store.Index(),
-		CWD:     cwd,
-		UserDir: opts.UserDir,
+		Docs:           discoverDocs(cwd, opts.UserDir),
+		GlobalGuidance: store.globalGuidance(),
+		Store:          store,
+		Index:          store.Index(),
+		CWD:            cwd,
+		UserDir:        opts.UserDir,
 	}
 }
 
@@ -77,7 +79,7 @@ func (s *Set) DocPath(scope Scope) string {
 // the base prompt byte-for-byte untouched (and the cache prefix maximal) when
 // there is no memory at all.
 func (s *Set) Empty() bool {
-	return s == nil || (len(s.Docs) == 0 && strings.TrimSpace(s.Index) == "")
+	return s == nil || (len(s.Docs) == 0 && len(s.GlobalGuidance) == 0 && strings.TrimSpace(s.Index) == "")
 }
 
 // docScopes are the scopes the panel can target for a quick-add or a new doc.
@@ -130,8 +132,16 @@ func (s *Set) Block() string {
 	}
 	var b strings.Builder
 	b.WriteString("# Memory\n\n")
+	if len(s.GlobalGuidance) > 0 {
+		b.WriteString("## Global preferences and feedback\n\n")
+		b.WriteString("Cross-project preferences and working feedback saved in memory. Apply them when relevant. " +
+			"The current user request and more specific standing instructions take precedence, and factual details may be stale.\n")
+		for _, m := range s.GlobalGuidance {
+			fmt.Fprintf(&b, "\n### %s (global/%s)\n\n%s\n", displayTitle(m.Title, m.Name), NormalizeType(string(m.Type)), strings.TrimSpace(m.Body))
+		}
+	}
 	if len(s.Docs) > 0 {
-		b.WriteString("## Standing instructions\n\n")
+		b.WriteString("\n## Standing instructions\n\n")
 		b.WriteString("Always-on guidance loaded from instruction files. Follow it according to the displayed scope and precedence.\n")
 		for _, d := range s.Docs {
 			fmt.Fprintf(&b, "\n### %s (%s)\n\n%s\n", d.Path, d.Scope, strings.TrimSpace(d.Body))

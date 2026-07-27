@@ -201,17 +201,26 @@ func (s Store) Path(name string) string {
 // editor, and any future importer all go through here so the index never drifts
 // from the files. Returns the path written.
 func (s Store) Save(m Memory) (string, error) {
-	m.Scope = NormalizeFactScope(string(m.Scope))
-	dir := s.DirFor(m.Scope)
-	if dir == "" {
-		return "", fmt.Errorf("memory store unavailable (no user config dir)")
-	}
 	if strings.TrimSpace(m.Name) == "" {
 		return "", fmt.Errorf("memory needs a name")
 	}
 	name := slug(m.Name)
 	if name == "" {
 		return "", fmt.Errorf("memory name needs at least one letter or digit")
+	}
+	m.Type = NormalizeType(string(m.Type))
+	if strings.TrimSpace(string(m.Scope)) == "" {
+		if existing, ok := s.existingScope(name); ok {
+			m.Scope = existing
+		} else {
+			m.Scope = FactScopeProject
+		}
+	} else {
+		m.Scope = NormalizeFactScope(string(m.Scope))
+	}
+	dir := s.DirFor(m.Scope)
+	if dir == "" {
+		return "", fmt.Errorf("memory store unavailable (no user config dir)")
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
@@ -235,6 +244,30 @@ func (s Store) Save(m Memory) (string, error) {
 		}
 	}
 	return path, nil
+}
+
+// existingScope returns the effective scope of an active same-name memory. A
+// missing metadata.scope is inferred from its directory, preserving legacy
+// global memories when callers omit scope during an update.
+func (s Store) existingScope(name string) (FactScope, bool) {
+	for _, dir := range s.dirs() {
+		if dir == "" {
+			continue
+		}
+		path, err := safeJoin(dir, name+".md")
+		if err != nil {
+			continue
+		}
+		m, ok := loadMemory(path)
+		if !ok {
+			continue
+		}
+		if m.Scope == "" {
+			return s.scopeForDir(dir), true
+		}
+		return NormalizeFactScope(string(m.Scope)), true
+	}
+	return "", false
 }
 
 // Archive removes a memory from the active store and moves its file under
@@ -417,16 +450,23 @@ type memoryFrontmatter struct {
 	Title    string `yaml:"title,omitempty"`
 	Desc     string `yaml:"description"`
 	Metadata struct {
-		Type  string `yaml:"type"`
-		Scope string `yaml:"scope"`
+		Type     string `yaml:"type"`
+		FactType string `yaml:"fact_type,omitempty"`
+		Scope    string `yaml:"scope"`
 	} `yaml:"metadata"`
 }
 
 // render serializes a memory to frontmatter + body.
 func render(m Memory, name string) string {
 	fm := memoryFrontmatter{Name: name, Title: oneLine(m.Title), Desc: oneLine(m.Description)}
-	fm.Metadata.Type = string(NormalizeType(string(m.Type)))
-	fm.Metadata.Scope = string(NormalizeFactScope(string(m.Scope)))
+	actualType := NormalizeType(string(m.Type))
+	scope := NormalizeFactScope(string(m.Scope))
+	compatType := previousReleaseRoutingType(actualType, scope)
+	fm.Metadata.Type = string(compatType)
+	if compatType != actualType {
+		fm.Metadata.FactType = string(actualType)
+	}
+	fm.Metadata.Scope = string(scope)
 	var b strings.Builder
 	b.WriteString("---\n")
 	enc := yaml.NewEncoder(&b)
@@ -438,6 +478,23 @@ func render(m Memory, name string) string {
 	b.WriteString(strings.TrimSpace(m.Body))
 	b.WriteString("\n")
 	return b.String()
+}
+
+// previousReleaseRoutingType keeps scope safe when an older Reasonix binary
+// shares the same state directory. Previous releases routed user/feedback to
+// GlobalDir and project/reference to Dir, so metadata.type remains a compatible
+// routing hint while metadata.fact_type preserves the independent new category.
+func previousReleaseRoutingType(actual Type, scope FactScope) Type {
+	if scope == FactScopeGlobal {
+		if actual == TypeUser || actual == TypeFeedback {
+			return actual
+		}
+		return TypeUser
+	}
+	if actual == TypeProject || actual == TypeReference {
+		return actual
+	}
+	return TypeProject
 }
 
 // indexLineRe matches a managed index line so reindex/Delete can target the line
@@ -575,6 +632,40 @@ func (s Store) List() []Memory {
 	return out
 }
 
+// globalGuidance snapshots global user preferences and working feedback for the
+// stable session prefix. These categories were globally routed before explicit
+// scopes existed, so loading their bodies preserves the established first-turn
+// behavior without promoting project facts or references into instructions.
+func (s Store) globalGuidance() []Memory {
+	if s.GlobalDir == "" {
+		return nil
+	}
+	entries, err := os.ReadDir(s.GlobalDir)
+	if err != nil {
+		return nil
+	}
+	var out []Memory
+	for _, e := range entries {
+		if e.IsDir() || e.Name() == indexFile || !strings.HasSuffix(e.Name(), ".md") {
+			continue
+		}
+		m, ok := loadMemory(filepath.Join(s.GlobalDir, e.Name()))
+		if !ok {
+			continue
+		}
+		if m.Scope == "" {
+			m.Scope = FactScopeGlobal
+		}
+		if NormalizeFactScope(string(m.Scope)) != FactScopeGlobal ||
+			(m.Type != TypeUser && m.Type != TypeFeedback) || strings.TrimSpace(m.Body) == "" {
+			continue
+		}
+		out = append(out, m)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
 // ListArchived returns archived memories parsed from .archive/, newest first.
 // Archived files stay out of List() and the prompt index, so stale facts remain
 // inspectable without being reused as active truth. Reads from both GlobalDir
@@ -651,7 +742,7 @@ func loadMemory(path string) (Memory, bool) {
 		Name:        fm["name"],
 		Title:       fm["title"],
 		Description: fm["description"],
-		Type:        NormalizeType(fm["type"]),
+		Type:        persistedFactType(fm),
 		Scope:       factScopeFromFrontmatter(fm["scope"]),
 		Body:        strings.TrimSpace(body),
 	}
@@ -659,6 +750,13 @@ func loadMemory(path string) (Memory, bool) {
 		m.Name = strings.TrimSuffix(filepath.Base(path), ".md")
 	}
 	return m, true
+}
+
+func persistedFactType(fm map[string]string) Type {
+	if t := Type(strings.ToLower(strings.TrimSpace(fm["fact_type"]))); validTypes[t] {
+		return t
+	}
+	return NormalizeType(fm["type"])
 }
 
 func factScopeFromFrontmatter(s string) FactScope {
