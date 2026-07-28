@@ -74,12 +74,19 @@ func rebuildDerivedStateBoundUnlocked(target string, expectedStates map[string]s
 		}
 		repairMutationAfterRename(path)
 		if _, err := os.Lstat(path); err == nil {
+			// Confirmed state was already isolated. Persist the move so undo
+			// restores it and keeps the concurrent rewrite as a redo copy.
+			tx.Changes = append(tx.Changes, RepairChange{Scope: "derived:" + name, TargetPath: path, PreviousPath: quarantine})
+			if persistErr := persistRepairTransaction(tx); persistErr != nil {
+				return applied, fmt.Errorf("repair plan preview changed since confirmation; target was recreated during quarantine; confirmed state remains at %s; record undo: %v", quarantine, persistErr)
+			}
+			appendRepairLogBestEffort(tx)
 			return applied, fmt.Errorf("repair plan preview changed since confirmation; target was recreated during quarantine; confirmed state remains at %s", quarantine)
 		} else if !os.IsNotExist(err) {
 			return applied, err
 		}
 		if expected := expectedStates[path]; expected != "" {
-			if err := verifyRepairPlanStateID(quarantine, expected); err != nil {
+			if err := verifyRepairPlanStateIDFor(quarantine, path, expected); err != nil {
 				if restoreErr := restoreRepairNodeIfAbsent(quarantine, path); restoreErr != nil {
 					return applied, fmt.Errorf("derived state changed after confirmation and restore failed: %v: %w", restoreErr, err)
 				}

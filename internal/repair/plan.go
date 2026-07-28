@@ -94,13 +94,25 @@ func repairPlanActionPreviewID(action RepairPlanAction, preview RepairPlanPrevie
 }
 
 func repairPlanFileSnapshotAt(path string) repairPlanFileSnapshot {
+	return repairPlanFileSnapshotFor(path, path)
+}
+
+// repairPlanFileSnapshotFor reads the node at readPath but binds identityPath
+// into StateID. After a confirmed rename the quarantine path still proves the
+// original destination's content without treating the quarantine suffix as a
+// different confirmed target.
+func repairPlanFileSnapshotFor(readPath, identityPath string) repairPlanFileSnapshot {
+	// Target binds the real destination into StateID without exposing the path
+	// in the exported preview: confirmation for project A cannot be replayed
+	// against project B even when both files have identical content.
 	state := struct {
+		Target     string `json:"target"`
 		Kind       string `json:"kind"`
 		Mode       uint32 `json:"mode,omitempty"`
 		LinkTarget string `json:"linkTarget,omitempty"`
 		Content    string `json:"content,omitempty"`
-	}{Kind: "missing"}
-	info, err := os.Lstat(path)
+	}{Target: repairPlanTargetIdentity(identityPath), Kind: "missing"}
+	info, err := os.Lstat(readPath)
 	if err != nil {
 		if !os.IsNotExist(err) {
 			state.Kind = "unreadable"
@@ -112,13 +124,13 @@ func repairPlanFileSnapshotAt(path string) repairPlanFileSnapshot {
 	state.Mode = uint32(info.Mode())
 	if info.Mode()&os.ModeSymlink != 0 {
 		state.Kind = "symlink"
-		state.LinkTarget, _ = os.Readlink(path)
+		state.LinkTarget, _ = os.Readlink(readPath)
 	} else if info.Mode().IsRegular() {
 		state.Kind = "file"
 	} else if info.IsDir() {
 		state.Kind = "directory"
 	}
-	if b, readErr := os.ReadFile(path); readErr == nil {
+	if b, readErr := os.ReadFile(readPath); readErr == nil {
 		snapshot.Content = b
 		snapshot.Readable = true
 		sum := sha256.Sum256(snapshot.Content)
@@ -132,6 +144,14 @@ func repairPlanFileSnapshotAt(path string) repairPlanFileSnapshot {
 
 func repairPlanFileState(path string) string {
 	return repairPlanFileSnapshotAt(path).StateID
+}
+
+func verifyRepairPlanStateIDFor(readPath, identityPath, expected string) error {
+	actual := repairPlanFileSnapshotFor(readPath, identityPath).StateID
+	if expected != actual {
+		return fmt.Errorf("repair plan preview changed since confirmation; re-preview and re-confirm (expected %s, got %s)", expected, actual)
+	}
+	return nil
 }
 
 func repairPlanDerivedStateSnapshot(target string) (string, map[string]string) {
@@ -327,7 +347,7 @@ func PreviewRepairPlan(plan RepairPlan, opts ApplyPlanOptions) ([]RepairPlanPrev
 				return nil, fmt.Errorf("action %d: no rollback-ready update: %w", i+1, err)
 			}
 			preview.Description = fmt.Sprintf("Restore Reasonix %s over probationary %s", tx.FromVersion, tx.ToVersion)
-			preview.StateID = repairPlanStateID(tx)
+			preview.StateID, preview.fileStates = pendingUpdateBoundPreview(tx)
 		}
 		previews = append(previews, preview)
 	}
@@ -396,6 +416,9 @@ func ApplyRepairPlan(plan RepairPlan, opts ApplyPlanOptions) (ApplyPlanResult, e
 
 func applyRepairPlanAction(plan RepairPlan, action RepairPlanAction, bound RepairPlanPreview, opts ApplyPlanOptions, enforcePreview bool) ([]string, error) {
 	if action.Type == "rollback_update" {
+		// Target locks are taken inside rollback under the pending-update
+		// lock so Guard and the updater serialize on the same release-unit
+		// paths. Re-check the bound preview after those locks are held.
 		var rollback UpdateRollbackResult
 		var err error
 		if enforcePreview {
@@ -481,6 +504,81 @@ func applyRepairPlanAction(plan RepairPlan, action RepairPlanAction, bound Repai
 	default:
 		return nil, fmt.Errorf("unsupported repair action %q", action.Type)
 	}
+}
+
+// pendingUpdateBoundPreview binds the pending transaction identity and the
+// live release-unit nodes that rollback would displace. The transaction alone
+// is not enough: another installer can replace the current binaries while the
+// pending JSON stays unchanged.
+func pendingUpdateBoundPreview(tx *UpdateTransaction) (string, map[string]string) {
+	if tx == nil {
+		return "", nil
+	}
+	files := pendingUpdateFiles(tx)
+	type unitState struct {
+		State string `json:"state"`
+	}
+	current := make([]unitState, 0, len(files)+1)
+	fileStates := make(map[string]string, len(files)+1)
+	bind := func(path string) {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			return
+		}
+		if _, ok := fileStates[path]; ok {
+			return
+		}
+		stateID := repairPlanFileState(path)
+		fileStates[path] = stateID
+		current = append(current, unitState{State: stateID})
+	}
+	for _, f := range files {
+		bind(f.TargetPath)
+	}
+	bind(tx.TargetPath)
+	return repairPlanStateID(struct {
+		Transaction string      `json:"transaction"`
+		Current     []unitState `json:"current"`
+	}{repairPlanStateID(tx), current}), fileStates
+}
+
+func pendingUpdateFiles(tx *UpdateTransaction) []UpdateTransactionFile {
+	if tx == nil {
+		return nil
+	}
+	if len(tx.Files) > 0 {
+		return tx.Files
+	}
+	return []UpdateTransactionFile{{
+		TargetPath: tx.TargetPath,
+		BackupPath: tx.BackupPath,
+		SHA256:     tx.BackupSHA256,
+	}}
+}
+
+func pendingUpdateTargetPaths(tx *UpdateTransaction) []string {
+	if tx == nil {
+		return nil
+	}
+	files := pendingUpdateFiles(tx)
+	paths := make([]string, 0, len(files)+1)
+	seen := map[string]struct{}{}
+	add := func(path string) {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			return
+		}
+		if _, ok := seen[path]; ok {
+			return
+		}
+		seen[path] = struct{}{}
+		paths = append(paths, path)
+	}
+	for _, f := range files {
+		add(f.TargetPath)
+	}
+	add(tx.TargetPath)
+	return paths
 }
 
 func repairPlanActionMutationPaths(action RepairPlanAction, opts ApplyPlanOptions) ([]string, error) {

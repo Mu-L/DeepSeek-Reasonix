@@ -3,6 +3,7 @@ package repair
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -62,6 +63,72 @@ func restoreRepairNodeIfAbsent(backup, target string) error {
 	return os.Remove(backup)
 }
 
+// canonicalRepairPath resolves a repair target to a stable key shared by
+// mutation locks and preview identity. Existing symlink parents are followed
+// so alias paths converge; case-insensitive platforms fold case so
+// /Project and /project cannot take different locks.
+func canonicalRepairPath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	absolute, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		absolute = filepath.Clean(path)
+	}
+	absolute = resolveExistingSymlinkPath(absolute)
+	absolute = filepath.Clean(absolute)
+	switch runtime.GOOS {
+	case "windows", "darwin":
+		return strings.ToLower(filepath.ToSlash(absolute))
+	default:
+		return absolute
+	}
+}
+
+// resolveExistingSymlinkPath follows symlinks for the longest existing prefix
+// of path. Missing leaf components stay attached so create-only targets still
+// lock under their real parent directory.
+func resolveExistingSymlinkPath(path string) string {
+	if path == "" {
+		return ""
+	}
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
+	}
+	var missing []string
+	dir := path
+	for {
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		missing = append(missing, filepath.Base(dir))
+		if resolved, err := filepath.EvalSymlinks(parent); err == nil {
+			parts := make([]string, 0, 1+len(missing))
+			parts = append(parts, resolved)
+			for i := len(missing) - 1; i >= 0; i-- {
+				parts = append(parts, missing[i])
+			}
+			return filepath.Join(parts...)
+		}
+		dir = parent
+	}
+	return path
+}
+
+// repairPlanTargetIdentity is a non-reversible identity for a filesystem
+// target. It is embedded in preview state IDs so confirmation cannot be
+// reused against a different real path that happens to have the same content.
+func repairPlanTargetIdentity(path string) string {
+	key := canonicalRepairPath(path)
+	if key == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(sum[:])
+}
+
 // lockRepairMutations serializes repair read-check-write cycles by canonical
 // target path. Lock files live in Reasonix state rather than beside project or
 // configuration files, and paths are sorted so multi-target actions cannot
@@ -82,13 +149,9 @@ func lockRepairMutations(paths ...string) (func(), error) {
 		if path == "" {
 			continue
 		}
-		absolute, err := filepath.Abs(filepath.Clean(path))
-		if err != nil {
-			return nil, fmt.Errorf("lock repair mutations: resolve target: %w", err)
-		}
-		key := filepath.Clean(absolute)
-		if runtime.GOOS == "windows" {
-			key = strings.ToLower(filepath.ToSlash(key))
+		key := canonicalRepairPath(path)
+		if key == "" {
+			return nil, fmt.Errorf("lock repair mutations: resolve target: empty path")
 		}
 		if _, ok := unique[key]; ok {
 			continue

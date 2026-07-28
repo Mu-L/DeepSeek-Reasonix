@@ -4,22 +4,15 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
 
 func repairMutationTestKey(path string) string {
-	key, err := filepath.Abs(filepath.Clean(path))
-	if err != nil {
-		return filepath.Clean(path)
-	}
-	if runtime.GOOS == "windows" {
-		return strings.ToLower(filepath.ToSlash(key))
-	}
-	return filepath.Clean(key)
+	return canonicalRepairPath(path)
 }
 
 func TestDecodeRepairPlanRejectsUnknownFieldsAndActions(t *testing.T) {
@@ -228,7 +221,7 @@ func TestRollbackPendingUpdateStateBindsCompleteTransaction(t *testing.T) {
 	if err := os.WriteFile(target, []byte("new"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	expectedState := repairPlanStateID(tx)
+	expectedState, _ := pendingUpdateBoundPreview(tx)
 	tx.FromVersion = "different-old-version"
 	if err := WritePendingUpdate(tx); err != nil {
 		t.Fatal(err)
@@ -318,6 +311,20 @@ func TestApplyRepairPlanPreservesUncooperativeWriteAfterRename(t *testing.T) {
 	}
 	if got, err := os.ReadFile(quarantines[0]); err != nil || string(got) != "confirmed" {
 		t.Fatalf("confirmed state backup = %q, %v", got, err)
+	}
+	// The moved node must still be undoable: concurrent rewrite is retained as redo.
+	if _, err := UndoLastRepair(); err != nil {
+		t.Fatalf("undo after concurrent recreate: %v", err)
+	}
+	if got, err := os.ReadFile(tabs); err != nil || string(got) != "confirmed" {
+		t.Fatalf("undo restored = %q, %v, want confirmed quarantine", got, err)
+	}
+	redos, err := filepath.Glob(tabs + ".reasonix-redo-*")
+	if err != nil || len(redos) != 1 {
+		t.Fatalf("redo copies = %v, %v", redos, err)
+	}
+	if got, err := os.ReadFile(redos[0]); err != nil || string(got) != "new-after-rename" {
+		t.Fatalf("redo retained concurrent write = %q, %v", got, err)
 	}
 }
 
@@ -658,5 +665,216 @@ func TestProjectRepairPlanDoesNotRepairGlobalConfig(t *testing.T) {
 	}
 	if _, err := os.Stat(project); !os.IsNotExist(err) {
 		t.Fatalf("project config was not quarantined: %v", err)
+	}
+}
+
+func TestRepairPlanPreviewIDRejectsSameContentDifferentTargets(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("REASONIX_HOME", home)
+	rootA := t.TempDir()
+	rootB := t.TempDir()
+	content := []byte("[broken\n")
+	for _, root := range []string{rootA, rootB} {
+		if err := os.WriteFile(filepath.Join(root, "reasonix.toml"), content, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	plan := RepairPlan{SchemaVersion: 1, Summary: "project", Actions: []RepairPlanAction{{Type: "repair_config", Scope: "project", Reason: "bad toml"}}}
+	previewA, err := PreviewRepairPlan(plan, ApplyPlanOptions{Root: rootA, AllowProject: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	previewB, err := PreviewRepairPlan(plan, ApplyPlanOptions{Root: rootB, AllowProject: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	idA := RepairPlanPreviewID(plan, previewA)
+	idB := RepairPlanPreviewID(plan, previewB)
+	if idA == "" || idA == idB {
+		t.Fatalf("same-content different roots must not share previewId: a=%s b=%s", idA, idB)
+	}
+	if _, err := ApplyRepairPlan(plan, ApplyPlanOptions{Root: rootB, AllowProject: true, ExpectedPreviewID: idA}); err == nil || !strings.Contains(err.Error(), "preview changed since confirmation") {
+		t.Fatalf("error = %v, want cross-target preview refusal", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(rootB, "reasonix.toml")); err != nil || string(got) != string(content) {
+		t.Fatalf("project B was modified without confirmation: %q, %v", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(rootA, "reasonix.toml")); err != nil {
+		t.Fatalf("project A was touched: %v", err)
+	}
+}
+
+func TestRepairMutationLockConvergesSymlinkAliases(t *testing.T) {
+	base := t.TempDir()
+	realDir := filepath.Join(base, "real", "project")
+	if err := os.MkdirAll(realDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	linkParent := filepath.Join(base, "link")
+	if err := os.MkdirAll(linkParent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	linkDir := filepath.Join(linkParent, "project")
+	if err := os.Symlink(realDir, linkDir); err != nil {
+		t.Fatal(err)
+	}
+	realFile := filepath.Join(realDir, "reasonix.toml")
+	aliasFile := filepath.Join(linkDir, "reasonix.toml")
+	if err := os.WriteFile(realFile, []byte("[broken\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if canonicalRepairPath(realFile) != canonicalRepairPath(aliasFile) {
+		t.Fatalf("symlink aliases diverged: real=%q alias=%q", canonicalRepairPath(realFile), canonicalRepairPath(aliasFile))
+	}
+
+	holder, err := lockRepairMutations(realFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reached := make(chan struct{})
+	originalHook := repairMutationBeforeLock
+	repairMutationBeforeLock = func(paths []string) {
+		if len(paths) == 1 && paths[0] == canonicalRepairPath(aliasFile) {
+			select {
+			case <-reached:
+			default:
+				close(reached)
+			}
+		}
+	}
+	t.Cleanup(func() { repairMutationBeforeLock = originalHook })
+
+	type outcome struct {
+		unlock func()
+		err    error
+	}
+	resultCh := make(chan outcome, 1)
+	go func() {
+		unlock, err := lockRepairMutations(aliasFile)
+		resultCh <- outcome{unlock, err}
+	}()
+	select {
+	case <-reached:
+	case <-time.After(2 * time.Second):
+		holder()
+		t.Fatal("alias lock did not wait on real-path holder")
+	}
+	select {
+	case got := <-resultCh:
+		if got.unlock != nil {
+			got.unlock()
+		}
+		holder()
+		t.Fatalf("alias lock acquired while real path held: err=%v", got.err)
+	case <-time.After(150 * time.Millisecond):
+	}
+	holder()
+	got := <-resultCh
+	if got.err != nil {
+		t.Fatalf("alias lock after release: %v", got.err)
+	}
+	got.unlock()
+}
+
+func TestApplyRepairPlanRejectsReleaseUnitDriftWithStablePendingUpdate(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("REASONIX_HOME", home)
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "reasonix-desktop")
+	originalExecutable := repairExecutable
+	repairExecutable = func() (string, error) { return filepath.Join(dir, "reasonix-guard"), nil }
+	t.Cleanup(func() { repairExecutable = originalExecutable })
+	if err := os.WriteFile(target, []byte("old"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := PrepareFileUpdate("v1", "v2", target); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte("new"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	plan := RepairPlan{SchemaVersion: 1, Summary: "rollback", Actions: []RepairPlanAction{{Type: "rollback_update", Reason: "failed update"}}}
+	preview, err := PreviewRepairPlan(plan, ApplyPlanOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := RepairPlanPreviewID(plan, preview)
+	// Pending transaction stays identical, but the live binary changes again.
+	if err := os.WriteFile(target, []byte("newer-unconfirmed"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ApplyRepairPlan(plan, ApplyPlanOptions{ExpectedPreviewID: expected}); err == nil || !strings.Contains(err.Error(), "preview changed since confirmation") {
+		t.Fatalf("error = %v, want release-unit drift refusal", err)
+	}
+	if got, err := os.ReadFile(target); err != nil || string(got) != "newer-unconfirmed" {
+		t.Fatalf("stale rollback displaced current binary: %q, %v", got, err)
+	}
+}
+
+func TestRepairMutationLockSerializesUpdateRollbackAndPrepare(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("REASONIX_HOME", home)
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "reasonix-desktop")
+	originalExecutable := repairExecutable
+	repairExecutable = func() (string, error) { return filepath.Join(dir, "reasonix-guard"), nil }
+	t.Cleanup(func() { repairExecutable = originalExecutable })
+	if err := os.WriteFile(target, []byte("old"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := PrepareFileUpdate("v1", "v2", target); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte("new"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	holder, err := lockRepairMutations(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reached := make(chan struct{})
+	originalHook := repairMutationBeforeLock
+	repairMutationBeforeLock = func(paths []string) {
+		if len(paths) == 1 && paths[0] == canonicalRepairPath(target) {
+			select {
+			case <-reached:
+			default:
+				close(reached)
+			}
+		}
+	}
+	t.Cleanup(func() { repairMutationBeforeLock = originalHook })
+
+	var once sync.Once
+	resultCh := make(chan error, 1)
+	go func() {
+		_, err := RollbackPendingUpdate()
+		resultCh <- err
+	}()
+	select {
+	case <-reached:
+	case <-time.After(2 * time.Second):
+		holder()
+		t.Fatal("rollback did not wait for shared target lock")
+	}
+	select {
+	case err := <-resultCh:
+		holder()
+		t.Fatalf("rollback completed while target locked: %v", err)
+	case <-time.After(150 * time.Millisecond):
+	}
+	once.Do(holder)
+	if err := <-resultCh; err != nil {
+		t.Fatalf("rollback after target unlock: %v", err)
+	}
+	if got, err := os.ReadFile(target); err != nil || string(got) != "old" {
+		t.Fatalf("target after serialized rollback = %q, %v", got, err)
 	}
 }

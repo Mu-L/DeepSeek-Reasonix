@@ -203,13 +203,19 @@ func restoreConfigSnapshotBoundUnlocked(id string, expectedStates map[string]str
 		if moved {
 			if expectedStates != nil {
 				if _, err := os.Lstat(dest); err == nil {
+					// Confirmed config already moved aside; record the transaction
+					// so undo can restore it and retain the concurrent rewrite.
+					tx.Changes = append(tx.Changes, RepairChange{Scope: "global", TargetPath: dest, PreviousPath: backup})
+					if saveErr := saveRepairTransaction(tx); saveErr != nil {
+						return nil, fmt.Errorf("repair plan preview changed since confirmation; target was recreated during snapshot restore; confirmed state remains at %s; record undo: %v", backup, saveErr)
+					}
 					return nil, fmt.Errorf("repair plan preview changed since confirmation; target was recreated during snapshot restore; confirmed state remains at %s", backup)
 				} else if !os.IsNotExist(err) {
 					return nil, err
 				}
 			}
 			if expected := expectedStates[dest]; expected != "" {
-				if err := verifyRepairPlanStateID(backup, expected); err != nil {
+				if err := verifyRepairPlanStateIDFor(backup, dest, expected); err != nil {
 					return nil, joinRestoreCleanupError(err, backup, restoreRepairNodeIfAbsent(backup, dest))
 				}
 			}

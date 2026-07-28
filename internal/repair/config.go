@@ -105,12 +105,19 @@ func inspectAndRepairConfigUnlocked(opts ConfigOptions) (ConfigReport, error) {
 		}
 		repairMutationAfterRename(item.path)
 		if _, err := os.Lstat(item.path); err == nil {
+			// The confirmed node already moved; record it so UndoLastRepair can
+			// restore it and retain the concurrent rewrite as a redo copy.
+			tx.Changes = append(tx.Changes, RepairChange{TargetPath: item.path, PreviousPath: quarantine, Scope: item.scope})
+			if persistErr := persistRepairTransaction(tx); persistErr != nil {
+				return report, fmt.Errorf("repair plan preview changed since confirmation; target was recreated during quarantine; confirmed state remains at %s; record undo: %v", quarantine, persistErr)
+			}
+			appendRepairLogBestEffort(tx)
 			return report, fmt.Errorf("repair plan preview changed since confirmation; target was recreated during quarantine; confirmed state remains at %s", quarantine)
 		} else if !os.IsNotExist(err) {
 			return report, err
 		}
 		if expected := opts.expectedStates[item.path]; expected != "" {
-			if err := verifyRepairPlanStateID(quarantine, expected); err != nil {
+			if err := verifyRepairPlanStateIDFor(quarantine, item.path, expected); err != nil {
 				if restoreErr := restoreRepairNodeIfAbsent(quarantine, item.path); restoreErr != nil {
 					return report, fmt.Errorf("quarantine %s config changed after confirmation and restore failed: %v: %w", item.scope, restoreErr, err)
 				}

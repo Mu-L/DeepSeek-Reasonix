@@ -102,6 +102,14 @@ func PrepareFileUpdate(fromVersion, toVersion, targetPath string, siblingPaths .
 	}
 	unlock := lockPendingUpdate()
 	defer unlock()
+	// Hold the same target locks as rollback so prepare/snapshot cannot race
+	// a concurrent Guard restore of the release unit.
+	lockPaths := append([]string{targetPath}, siblingPaths...)
+	unlockTargets, lockErr := lockRepairMutations(lockPaths...)
+	if lockErr != nil {
+		return nil, fmt.Errorf("prepare update: lock targets: %w", lockErr)
+	}
+	defer unlockTargets()
 	backupDir := filepath.Join(root, "repair", "updates")
 	if err := os.MkdirAll(backupDir, 0o700); err != nil {
 		return nil, err
@@ -166,6 +174,11 @@ func PrepareAppBundleUpdate(fromVersion, toVersion, appPath, backupPath string) 
 	}
 	unlock := lockPendingUpdate()
 	defer unlock()
+	unlockTargets, lockErr := lockRepairMutations(tx.TargetPath)
+	if lockErr != nil {
+		return nil, fmt.Errorf("prepare update: lock targets: %w", lockErr)
+	}
+	defer unlockTargets()
 	if err := WritePendingUpdate(tx); err != nil {
 		return nil, err
 	}
@@ -305,16 +318,24 @@ func rollbackPendingUpdateMatching(expectedToVersion, expectedCreatedAt, expecte
 	if expected := strings.TrimSpace(expectedCreatedAt); expected != "" && expected != strings.TrimSpace(tx.CreatedAt) {
 		return UpdateRollbackResult{}, nil
 	}
-	if expected := strings.TrimSpace(expectedStateID); expected != "" && expected != repairPlanStateID(tx) {
-		return UpdateRollbackResult{}, nil
+	// Share release-unit target locks with other repair mutations so two
+	// REASONIX_HOME profiles cannot quarantine or restore the same binaries
+	// through different pending-update locks.
+	unlockTargets, lockErr := lockRepairMutations(pendingUpdateTargetPaths(tx)...)
+	if lockErr != nil {
+		return UpdateRollbackResult{}, fmt.Errorf("rollback update: lock targets: %w", lockErr)
+	}
+	defer unlockTargets()
+	if expected := strings.TrimSpace(expectedStateID); expected != "" {
+		actual, _ := pendingUpdateBoundPreview(tx)
+		if expected != actual {
+			return UpdateRollbackResult{}, nil
+		}
 	}
 	result := UpdateRollbackResult{FromVersion: tx.ToVersion, ToVersion: tx.FromVersion, TargetPath: tx.TargetPath}
 	switch tx.TargetKind {
 	case "file":
-		files := tx.Files
-		if len(files) == 0 {
-			files = []UpdateTransactionFile{{TargetPath: tx.TargetPath, BackupPath: tx.BackupPath, SHA256: tx.BackupSHA256}}
-		}
+		files := pendingUpdateFiles(tx)
 		// Verify every backup before touching any binary: a partial restore
 		// would recreate exactly the mixed-version install rollback exists to
 		// prevent. A missing hash is a validation failure, not a bypass —
