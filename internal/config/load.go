@@ -74,6 +74,7 @@ func loadForRoot(root string, migrateOnDisk bool) (*Config, error) {
 	userDefaultModel := cfg.DefaultModel
 	globalSecrets := cfg.Secrets
 	globalRemote := cfg.Remote.Clone()
+	globalTelemetry := cfg.Telemetry
 
 	tomlSources = append(tomlSources, projectTOML)
 	if err := mergeTOML(cfg, projectTOML); err != nil {
@@ -87,6 +88,9 @@ func loadForRoot(root string, migrateOnDisk bool) (*Config, error) {
 	// must not be able to inject hosts, jump chains, or port forwards that
 	// steer where Reasonix opens connections.
 	cfg.Remote = globalRemote
+	// CLI telemetry is an explicit user-global privacy choice. Project config
+	// cannot opt a user in or out, including when the global value is absent.
+	cfg.Telemetry = globalTelemetry
 	// TOML decoding replaces [[plugins]] wholesale, so cfg.Plugins now holds
 	// only the last file's. Re-merge by name across all sources (later wins) so a
 	// project reasonix.toml doesn't drop the global config's MCP servers.
@@ -185,6 +189,7 @@ func loadSafeModeForRoot(root string) *Config {
 	// every reporting path off instead of inheriting the enabled defaults.
 	cfg.Desktop.Telemetry = safeModeBoolPtr(false)
 	cfg.Desktop.Metrics = safeModeBoolPtr(false)
+	cfg.Telemetry.CLIMetrics = "off"
 	cfg.setExpansionEnv(nil)
 	cfg.CredentialsStore = credentialsStoreMode()
 	resolveProviderCredentialsForRoot(root, cfg)

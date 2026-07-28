@@ -3746,6 +3746,39 @@ allow = ["Bash(go test:*)"]
 	}
 }
 
+func TestRememberDynamicBashLiteralIsNotCoveredByBroadRule(t *testing.T) {
+	workspace := robustTempDir(t)
+	writeFile(t, workspace, "reasonix.toml", `
+[permissions]
+allow = ["Bash(git*)"]
+`)
+
+	const literal = "Bash=git status $(touch /tmp/reasonix-dynamic-approval)"
+	res := rememberPermissionRule(workspace, literal)
+	if !res.Saved || res.CoveredBy != "" || res.Err != nil {
+		t.Fatalf("remember dynamic literal = %+v, want newly saved rule", res)
+	}
+	cfg := config.LoadForEdit(filepath.Join(workspace, "reasonix.toml"))
+	if !hasPermissionRule(cfg.Permissions.Allow, "Bash(git*)") || !hasPermissionRule(cfg.Permissions.Allow, literal) {
+		t.Fatalf("allow rules = %v, want broad rule and dynamic literal", cfg.Permissions.Allow)
+	}
+
+	res = rememberPermissionRule(workspace, literal)
+	if res.Saved || res.CoveredBy != literal || res.Err != nil {
+		t.Fatalf("remember duplicate dynamic literal = %+v, want exact deduplication", res)
+	}
+	cfg = config.LoadForEdit(filepath.Join(workspace, "reasonix.toml"))
+	count := 0
+	for _, rule := range cfg.Permissions.Allow {
+		if rule == literal {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("dynamic literal count = %d in %v, want 1", count, cfg.Permissions.Allow)
+	}
+}
+
 func TestRememberPermissionRulePrunesNarrowRulesWhenSavingBroaderRule(t *testing.T) {
 	workspace := robustTempDir(t)
 	writeFile(t, workspace, "reasonix.toml", `
@@ -4672,7 +4705,11 @@ model = "x"
 		testutil.Turn{Text: "done"},
 	)
 	setBootTokenProfileTestProvider(t, prov)
-	ctrl, err := Build(context.Background(), Options{Sink: event.Discard, AdditionalDirs: []string{extra}})
+	ctrl, err := Build(context.Background(), Options{
+		Sink:                 event.Discard,
+		AdditionalDirs:       []string{extra},
+		HeadlessApprovalMode: control.ToolApprovalYolo,
+	})
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}

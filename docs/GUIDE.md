@@ -135,6 +135,71 @@ described above. The variables below are process-level advanced switches; set
 them before launching Reasonix. Project `.env` files are not a runtime source for
 Reasonix control variables.
 
+### CLI telemetry
+
+The CLI can send a once-per-day anonymous active-install ping and bounded,
+content-free event counters to `https://crash.reasonix.io`. Configure the
+user-global policy with:
+
+```bash
+reasonix config telemetry          # print the effective mode
+reasonix config telemetry auto     # default: local interactive TTY only
+reasonix config telemetry on       # also allow local headless `reasonix run`
+reasonix config telemetry off      # disable and delete pending counter files
+```
+
+On the first eligible release-build interactive session, Reasonix explains the
+exact data boundary and asks once before any telemetry request. The prompt is
+`[Y/n]`: pressing Enter, `y`, or `yes` stores `auto`; `n` or `no` stores `off`
+and deletes pending counters. After the choice is saved, enabled reporting is
+silent and the prompt is not shown again. If the preference cannot be saved,
+nothing is uploaded.
+
+Reporting is always disabled in CI, Safe Mode, development builds, and when
+`DO_NOT_TRACK` is set or `REASONIX_TELEMETRY=0`. Under `auto`, redirected/piped
+or otherwise non-interactive sessions do not report. When no choice has been
+saved yet, these ineligible sessions neither prompt nor report. Network failures
+after consent are silent and never change stdout, stderr, or the process exit
+code; unsent counters stay in a bounded local queue for a later invocation.
+
+The ping contains a dedicated random 128-bit CLI install ID, CLI version, OS,
+architecture, and the `cli` surface marker. Counter batches use that same ID for
+daily active-install deduplication and contain only fixed buckets such as CLI
+mode/profile, permission/session mode, turn latency, finish reason, cache-hit
+range, generic Provider/tool error class, compaction, recovery counters, and
+normalized UI language. This ID is separate from the desktop install ID and is
+not an account, hardware, repository, or session identifier.
+
+Reasonix never uploads prompts, answers, reasoning, tool names/arguments/output,
+paths, repositories/branches, session IDs, exact token or cost values,
+Provider/model names, base URLs, or environment variables.
+
+### CLI crash reports
+
+An unhandled Go panic that reaches the CLI entrypoint is saved locally as a sanitized report under
+`<Reasonix home>/cli-crash-reports`. Reasonix keeps at most 10 files with owner-only
+permissions. The panic value is never serialized. Absolute source paths become
+`<path>/<file>.go:<line>`, function arguments are removed, and the same secret,
+token, email, and long-identifier scrubbers run both when saving and immediately
+before sending.
+
+Crash reports are never uploaded automatically. Review and manage them with:
+
+```bash
+reasonix report                 # preview newest; prompt before sending on a TTY
+reasonix report list            # list local reports
+reasonix report show [ID]       # preview without sending
+reasonix report send [ID]       # explicit send; delete locally only after success
+reasonix report delete [ID]     # delete without sending
+```
+
+Piped or redirected `reasonix report` calls only preview and never prompt or
+send. Safe Mode also blocks sending while leaving the local report available for
+review or deletion. The CLI telemetry setting does not auto-send or auto-delete
+these separately reviewed reports. Runtime fatal throws, operating-system kills,
+and panics in unwrapped background goroutines cannot be recovered by Go and do
+not produce this local report.
+
 ## Serve web frontend
 
 `reasonix serve` starts the same local engine behind a browser UI. Use it when
@@ -561,10 +626,19 @@ for example `Bash(npm run build)`, `Bash(npm run test:*)`, and `Edit(docs/**)`.
 `reasonix` can grant Bash as an exact command or as a conservative command
 prefix (for example `Bash(go test:*)`), while file-editing tools share session
 edit grants and persist path-scoped rules such as `Edit(src/app.go)`.
-`reasonix run` stays autonomous but still honours `deny`.
+Parameter/arithmetic expansions, assignments, heredocs, file redirects, and globs cannot reuse a bare
+Bash, prefix, or glob allow; a user-approved reusable choice saves the whole
+command as `Bash=<literal>`. They still follow normal fallback, so Auto executes
+them without an extra prompt. Command/process substitution, a dynamic command
+name, `eval`, `source`, shell `-c`, inline runtime code, and unparseable forms
+require a human in interactive Ask/Auto. Headless Ask/Auto/DontAsk reject that
+nested/indirect class unless an exact literal exists; YOLO may bypass it.
+`reasonix run` otherwise stays autonomous and always honours `deny`.
 
 Ask is not read-only: after approval, a writer can still run. Permissions decide
 whether to allow or prompt; the Sandbox is the enforced capability boundary.
+The sandbox remains a second boundary after authorization; confinement cannot
+make ambiguous command parsing safe to authorize automatically.
 
 Permissions are *policy* (which calls to allow / prompt). The **sandbox** is
 *enforcement*: the file-writers (`write_file` / `edit_file` / `multi_edit` / `move_file`)
