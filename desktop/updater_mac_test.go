@@ -121,6 +121,83 @@ func TestMacUpdateHandoffWaitsForExactProcessAndRollsBackLaunchFailure(t *testin
 	}
 }
 
+func TestMacUpdateHandoffRetainsRecoveryStateWhenRollbackRestoreFails(t *testing.T) {
+	root := t.TempDir()
+	oldApp := filepath.Join(root, "Reasonix.app")
+	newApp := filepath.Join(root, "staging", "Reasonix.app")
+	backupApp := oldApp + ".reasonix-update-backup"
+	pending := filepath.Join(root, "pending.json")
+	logPath := filepath.Join(root, "update.log")
+	for _, dir := range []string{oldApp, newApp} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(oldApp, "marker"), []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(newApp, "marker"), []byte("new"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pending, []byte("pending"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tx := &repair.UpdateTransaction{
+		ToVersion:          "v2",
+		CreatedAt:          "2026-07-28T00:00:00Z",
+		TargetKind:         "app-bundle",
+		TargetPath:         oldApp,
+		BackupPath:         backupApp,
+		HandoffAppPath:     newApp,
+		HandoffStagingPath: filepath.Dir(newApp),
+		HandoffOwnerPID:    99999999,
+	}
+	installMacHandoffTestDeps(t, tx, pending, logPath, nil)
+
+	originalOpen := openCommand
+	openCalls := 0
+	openCommand = func(args ...string) *exec.Cmd {
+		openCalls++
+		return exec.Command("/bin/sh", "-c", "exit 1")
+	}
+	t.Cleanup(func() { openCommand = originalOpen })
+	originalRename := macHandoffRename
+	macHandoffRename = func(oldPath, newPath string) error {
+		if oldPath == backupApp && newPath == oldApp {
+			return fmt.Errorf("injected restore failure")
+		}
+		return os.Rename(oldPath, newPath)
+	}
+	t.Cleanup(func() { macHandoffRename = originalRename })
+
+	code := runMacUpdateHandoff(macUpdateHandoffConfig{ToVersion: tx.ToVersion, CreatedAt: tx.CreatedAt})
+	if code == 0 {
+		t.Fatal("handoff should fail when rollback cannot restore the backup")
+	}
+	if _, err := os.Stat(pending); err != nil {
+		t.Fatalf("failed rollback removed pending recovery state: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(backupApp, "marker")); err != nil || string(got) != "old" {
+		t.Fatalf("backup recovery bundle = %q, %v", got, err)
+	}
+	if _, err := os.Stat(filepath.Dir(newApp)); err != nil {
+		t.Fatalf("failed rollback removed staging recovery state: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(oldApp, "marker")); err != nil || string(got) != "new" {
+		t.Fatalf("failed replacement was not compensated back to live path: %q, %v", got, err)
+	}
+	if openCalls != 1 {
+		t.Fatalf("open calls = %d, want only the failed replacement launch", openCalls)
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(logData), "failed to restore backup bundle") {
+		t.Fatalf("handoff log lacks restore failure: %s", logData)
+	}
+}
+
 func TestMacUpdateHandoffHoldsMutationLockDuringSwap(t *testing.T) {
 	root := t.TempDir()
 	oldApp := filepath.Join(root, "Reasonix.app")

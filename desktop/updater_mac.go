@@ -34,6 +34,7 @@ var (
 	claimMacUpdateHandoff = repair.ClaimPendingAppBundleUpdateHandoff
 	clearMacUpdateHandoff = repair.ClearClaimedAppBundleUpdateHandoff
 	verifyMacHandoffApp   = verifyMacApp
+	macHandoffRename      = os.Rename
 	macHandoffLogPath     = func() string {
 		cacheDir, err := updateCacheDir()
 		if err != nil {
@@ -206,22 +207,40 @@ func runMacUpdateHandoff(cfg macUpdateHandoffConfig) int {
 		return 1
 	}
 
-	rollback := func() {
+	rollback := func() error {
 		logf("rolling back macOS update")
-		_ = os.RemoveAll(oldApp)
-		if err := os.Rename(backupApp, oldApp); err != nil {
-			logf("failed to restore backup bundle: %v", err)
+		failedApp := oldApp + ".reasonix-update-failed"
+		if err := os.RemoveAll(failedApp); err != nil {
+			return fmt.Errorf("remove prior failed replacement bundle: %w", err)
 		}
+		retainedFailedApp := true
+		if err := macHandoffRename(oldApp, failedApp); err != nil {
+			if os.IsNotExist(err) {
+				retainedFailedApp = false
+			} else {
+				return fmt.Errorf("retain failed replacement bundle: %w", err)
+			}
+		}
+		if err := macHandoffRename(backupApp, oldApp); err != nil {
+			if retainedFailedApp {
+				if compensateErr := macHandoffRename(failedApp, oldApp); compensateErr != nil {
+					return fmt.Errorf("restore backup bundle: %w (failed to restore replacement bundle: %v)", err, compensateErr)
+				}
+			}
+			return fmt.Errorf("restore backup bundle: %w", err)
+		}
+		_ = os.RemoveAll(failedApp)
 		clearPending()
 		_ = exec.Command("xattr", "-dr", "com.apple.quarantine", oldApp).Run()
 		if err := openCommand("-n", oldApp).Run(); err != nil {
 			_ = openCommand(oldApp).Run()
 		}
 		_ = os.RemoveAll(staging)
+		return nil
 	}
 
 	_ = os.RemoveAll(backupApp)
-	if err := os.Rename(oldApp, backupApp); err != nil {
+	if err := macHandoffRename(oldApp, backupApp); err != nil {
 		logf("failed to move current app bundle to backup: %v", err)
 		clearPending()
 		_ = os.RemoveAll(staging)
@@ -230,13 +249,17 @@ func runMacUpdateHandoff(cfg macUpdateHandoffConfig) int {
 	}
 	if err := exec.Command("ditto", newApp, oldApp).Run(); err != nil {
 		logf("failed to copy replacement app bundle: %v", err)
-		rollback()
+		if rollbackErr := rollback(); rollbackErr != nil {
+			logf("failed to restore backup bundle: %v", rollbackErr)
+		}
 		return 1
 	}
 	_ = exec.Command("xattr", "-dr", "com.apple.quarantine", oldApp).Run()
 	if err := openCommand("-n", oldApp).Run(); err != nil {
 		logf("LaunchServices rejected the replacement app bundle: %v", err)
-		rollback()
+		if rollbackErr := rollback(); rollbackErr != nil {
+			logf("failed to restore backup bundle: %v", rollbackErr)
+		}
 		return 1
 	}
 	logf("replacement app bundle launched")

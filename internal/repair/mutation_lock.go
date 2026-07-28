@@ -82,7 +82,9 @@ func canonicalRepairPath(path string) string {
 	}
 	absolute = resolveParentSymlinkPath(absolute)
 	absolute = filepath.Clean(absolute)
-	if repairPathCaseInsensitive(absolute) {
+	caseInsensitive := repairPathCaseInsensitive(absolute)
+	absolute = platformRepairPathUnicodeNormalized(absolute)
+	if caseInsensitive {
 		return strings.ToLower(filepath.ToSlash(absolute))
 	}
 	return absolute

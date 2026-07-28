@@ -219,6 +219,56 @@ func TestApplyRepairPlanRollsBackCurrentConfirmedUpdateOnce(t *testing.T) {
 	}
 }
 
+func TestApplyRepairPlanRejectsBackupChangedDuringRollbackStaging(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("REASONIX_HOME", home)
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "reasonix-desktop")
+	originalExecutable := repairExecutable
+	repairExecutable = func() (string, error) { return filepath.Join(dir, "reasonix-guard"), nil }
+	t.Cleanup(func() { repairExecutable = originalExecutable })
+	if err := os.WriteFile(target, []byte("old"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := PrepareFileUpdate("v1", "v2", target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte("new"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	plan := RepairPlan{SchemaVersion: 1, Summary: "rollback", Actions: []RepairPlanAction{{Type: "rollback_update", Reason: "failed update"}}}
+	preview, err := PreviewRepairPlan(plan, ApplyPlanOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := RepairPlanPreviewID(plan, preview)
+
+	originalCopy := rollbackStageCopy
+	rollbackStageCopy = func(src, dst string, mode os.FileMode) (string, error) {
+		if src == tx.BackupPath {
+			if err := os.WriteFile(src, []byte("tampered"), 0o700); err != nil {
+				return "", err
+			}
+		}
+		return originalCopy(src, dst, mode)
+	}
+	t.Cleanup(func() { rollbackStageCopy = originalCopy })
+
+	if _, err := ApplyRepairPlan(plan, ApplyPlanOptions{ExpectedPreviewID: expected}); err == nil || !strings.Contains(err.Error(), "backup hash mismatch") {
+		t.Fatalf("error = %v, want staged backup hash refusal", err)
+	}
+	if got, err := os.ReadFile(target); err != nil || string(got) != "new" {
+		t.Fatalf("rollback installed unconfirmed bytes: %q, %v", got, err)
+	}
+	if _, err := ReadPendingUpdate(); err != nil {
+		t.Fatalf("failed rollback consumed pending transaction: %v", err)
+	}
+}
+
 func TestRollbackPendingUpdateStateBindsCompleteTransaction(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("REASONIX_HOME", home)

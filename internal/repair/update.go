@@ -550,10 +550,17 @@ func restoreReleaseUnit(files []UpdateTransactionFile) (mixed bool, err error) {
 			mode = st.Mode().Perm()
 		}
 		stage := f.TargetPath + ".reasonix-rollback-stage"
-		if _, copyErr := rollbackStageCopy(f.BackupPath, stage, mode); copyErr != nil {
+		stagedSHA256, copyErr := rollbackStageCopy(f.BackupPath, stage, mode)
+		if copyErr != nil {
 			return false, fmt.Errorf("stage %s: %w", filepath.Base(f.TargetPath), copyErr)
 		}
 		stages[i] = stage
+		// The backup can change after the preflight hash but before or during
+		// this copy. Bind the bytes that will actually be installed, not only
+		// the source path observed before staging.
+		if !strings.EqualFold(stagedSHA256, f.SHA256) {
+			return false, fmt.Errorf("stage %s: backup hash mismatch", filepath.Base(f.TargetPath))
+		}
 	}
 	asides := make([]string, len(files))
 	processed := make([]bool, len(files))
