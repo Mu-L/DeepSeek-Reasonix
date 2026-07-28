@@ -145,24 +145,33 @@ func TestStartForSession_AcceptsValidInput(t *testing.T) {
 	defer m.Close()
 
 	ran := false
-	done := make(chan struct{})
-	j := m.StartForSession("session-20260724-142525abc", "task", "normal call", func(_ context.Context, _ io.Writer) (string, error) {
+	release := make(chan struct{})
+	j := m.StartForSession("session-20260724-142525abc", "task", "normal call", func(ctx context.Context, _ io.Writer) (string, error) {
 		ran = true
-		close(done)
-		return "ok", nil
+		select {
+		case <-release:
+			return "ok", nil
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
 	})
-	if j.status != Running {
-		t.Fatalf("job status = %q, want Running (artifactErr=%q)", j.status, j.artifactErr)
+	j.mu.Lock()
+	status := j.status
+	artifactErr := j.artifactErr
+	artifactPath := j.artifactPath
+	j.mu.Unlock()
+	if status != Running {
+		t.Fatalf("job status = %q, want Running (artifactErr=%q)", status, artifactErr)
 	}
-	if j.artifactPath == "" {
+	if artifactPath == "" {
 		t.Fatal("artifactPath empty; expected a path under the temp root")
 	}
-	if !strings.HasPrefix(j.artifactPath, m.tempRoot) {
-		t.Fatalf("artifactPath = %q does not start with temp root %q", j.artifactPath, m.tempRoot)
+	if !strings.HasPrefix(artifactPath, m.tempRoot) {
+		t.Fatalf("artifactPath = %q does not start with temp root %q", artifactPath, m.tempRoot)
 	}
 
 	// Wait for run to finish and confirm cleanup paths still work.
-	<-done
+	close(release)
 	res := m.WaitForSession(context.Background(), "session-20260724-142525abc", []string{j.ID}, 5)
 	if len(res) != 1 {
 		t.Fatalf("WaitForSession returned %d results, want 1", len(res))
