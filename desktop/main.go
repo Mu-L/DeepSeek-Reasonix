@@ -100,6 +100,11 @@ func main() {
 	if handled, exitCode := RunRemoteAskPassHelper(context.Background(), os.Args[1:], os.Getenv, os.Stdout); handled {
 		os.Exit(exitCode)
 	}
+	// Detached macOS self-update child: wait for the old PID, hold the shared
+	// repair mutation lock, then swap the .app bundle. Must run before Wails.
+	if handled, exitCode := maybeRunMacUpdateHandoff(os.Args[1:]); handled {
+		os.Exit(exitCode)
+	}
 	capturePreviousFatalCrash()
 	installFatalCrashOutput()
 

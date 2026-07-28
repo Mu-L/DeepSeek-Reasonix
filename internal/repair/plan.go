@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -509,7 +510,9 @@ func applyRepairPlanAction(plan RepairPlan, action RepairPlanAction, bound Repai
 // pendingUpdateBoundPreview binds the pending transaction identity and the
 // live release-unit nodes that rollback would displace. The transaction alone
 // is not enough: another installer can replace the current binaries while the
-// pending JSON stays unchanged.
+// pending JSON stays unchanged. App bundles bind a full tree digest for both
+// the live bundle and its backup so interior executable drift invalidates the
+// confirmation.
 func pendingUpdateBoundPreview(tx *UpdateTransaction) (string, map[string]string) {
 	if tx == nil {
 		return "", nil
@@ -518,8 +521,8 @@ func pendingUpdateBoundPreview(tx *UpdateTransaction) (string, map[string]string
 	type unitState struct {
 		State string `json:"state"`
 	}
-	current := make([]unitState, 0, len(files)+1)
-	fileStates := make(map[string]string, len(files)+1)
+	current := make([]unitState, 0, len(files)+2)
+	fileStates := make(map[string]string, len(files)+2)
 	bind := func(path string) {
 		path = strings.TrimSpace(path)
 		if path == "" {
@@ -528,18 +531,99 @@ func pendingUpdateBoundPreview(tx *UpdateTransaction) (string, map[string]string
 		if _, ok := fileStates[path]; ok {
 			return
 		}
-		stateID := repairPlanFileState(path)
+		stateID := repairPlanReleaseNodeState(path)
 		fileStates[path] = stateID
 		current = append(current, unitState{State: stateID})
 	}
 	for _, f := range files {
 		bind(f.TargetPath)
+		if strings.TrimSpace(f.BackupPath) != "" {
+			bind(f.BackupPath)
+		}
 	}
 	bind(tx.TargetPath)
+	if strings.EqualFold(strings.TrimSpace(tx.TargetKind), "app-bundle") || strings.TrimSpace(tx.BackupPath) != "" {
+		bind(tx.BackupPath)
+	}
 	return repairPlanStateID(struct {
 		Transaction string      `json:"transaction"`
 		Current     []unitState `json:"current"`
 	}{repairPlanStateID(tx), current}), fileStates
+}
+
+// repairPlanReleaseNodeState binds either a single-file identity or a full
+// directory tree digest. Directory kind/mode alone is not enough for .app
+// bundles: interior executables can change without touching the root node.
+func repairPlanReleaseNodeState(path string) string {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return repairPlanFileState(path)
+	}
+	if info.IsDir() {
+		return repairPlanTreeStateID(path)
+	}
+	return repairPlanFileState(path)
+}
+
+func repairPlanTreeStateID(root string) string {
+	type treeEntry struct {
+		Rel     string `json:"rel"`
+		Kind    string `json:"kind"`
+		Mode    uint32 `json:"mode,omitempty"`
+		Content string `json:"content,omitempty"`
+	}
+	entries := make([]treeEntry, 0, 64)
+	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			entries = append(entries, treeEntry{Rel: path, Kind: "unreadable"})
+			return nil
+		}
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			rel = path
+		}
+		if rel == "." {
+			rel = ""
+		}
+		info, infoErr := d.Info()
+		if infoErr != nil {
+			entries = append(entries, treeEntry{Rel: rel, Kind: "unreadable"})
+			return nil
+		}
+		entry := treeEntry{Rel: filepath.ToSlash(rel), Mode: uint32(info.Mode())}
+		switch {
+		case info.Mode()&os.ModeSymlink != 0:
+			entry.Kind = "symlink"
+			if target, readErr := os.Readlink(path); readErr == nil {
+				entry.Content = target
+			} else {
+				entry.Kind = "symlink-unreadable"
+			}
+		case info.IsDir():
+			entry.Kind = "directory"
+		case info.Mode().IsRegular():
+			entry.Kind = "file"
+			if sum, hashErr := hashFile(path); hashErr == nil {
+				entry.Content = sum
+			} else {
+				entry.Kind = "file-unreadable"
+			}
+		default:
+			entry.Kind = "other"
+		}
+		entries = append(entries, entry)
+		return nil
+	})
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].Rel == entries[j].Rel {
+			return entries[i].Kind < entries[j].Kind
+		}
+		return entries[i].Rel < entries[j].Rel
+	})
+	return repairPlanStateID(struct {
+		Target  string      `json:"target"`
+		Entries []treeEntry `json:"entries"`
+	}{repairPlanTargetIdentity(root), entries})
 }
 
 func pendingUpdateFiles(tx *UpdateTransaction) []UpdateTransactionFile {

@@ -64,9 +64,11 @@ func restoreRepairNodeIfAbsent(backup, target string) error {
 }
 
 // canonicalRepairPath resolves a repair target to a stable key shared by
-// mutation locks and preview identity. Existing symlink parents are followed
-// so alias paths converge; case-insensitive platforms fold case so
-// /Project and /project cannot take different locks.
+// mutation locks and preview identity. Parent-directory symlinks are followed
+// so alias paths converge, but the leaf name is never resolved: repair mutates
+// the leaf node itself via Lstat/Rename (including when the leaf is a symlink).
+// Case-insensitive platforms fold case so /Project and /project cannot take
+// different locks.
 func canonicalRepairPath(path string) string {
 	path = strings.TrimSpace(path)
 	if path == "" {
@@ -76,7 +78,7 @@ func canonicalRepairPath(path string) string {
 	if err != nil {
 		absolute = filepath.Clean(path)
 	}
-	absolute = resolveExistingSymlinkPath(absolute)
+	absolute = resolveParentSymlinkPath(absolute)
 	absolute = filepath.Clean(absolute)
 	switch runtime.GOOS {
 	case "windows", "darwin":
@@ -86,25 +88,29 @@ func canonicalRepairPath(path string) string {
 	}
 }
 
-// resolveExistingSymlinkPath follows symlinks for the longest existing prefix
-// of path. Missing leaf components stay attached so create-only targets still
-// lock under their real parent directory.
-func resolveExistingSymlinkPath(path string) string {
+// resolveParentSymlinkPath resolves symlink parents of path and re-attaches the
+// original leaf base name. The leaf is intentionally not EvalSymlinks'd: two
+// different symlink leaves that share a referent must stay distinct targets.
+func resolveParentSymlinkPath(path string) string {
 	if path == "" {
 		return ""
 	}
-	if resolved, err := filepath.EvalSymlinks(path); err == nil {
-		return resolved
+	parent := filepath.Dir(path)
+	base := filepath.Base(path)
+	if parent == path {
+		// Root or volume path: nothing to resolve above the leaf.
+		return path
 	}
+	if resolved, err := filepath.EvalSymlinks(parent); err == nil {
+		return filepath.Join(resolved, base)
+	}
+	// Parent may not exist yet (create-only targets). Resolve the longest
+	// existing ancestor and rejoin the missing components including the leaf.
 	var missing []string
-	dir := path
+	dir := parent
+	missing = append(missing, base)
 	for {
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			break
-		}
-		missing = append(missing, filepath.Base(dir))
-		if resolved, err := filepath.EvalSymlinks(parent); err == nil {
+		if resolved, err := filepath.EvalSymlinks(dir); err == nil {
 			parts := make([]string, 0, 1+len(missing))
 			parts = append(parts, resolved)
 			for i := len(missing) - 1; i >= 0; i-- {
@@ -112,9 +118,28 @@ func resolveExistingSymlinkPath(path string) string {
 			}
 			return filepath.Join(parts...)
 		}
-		dir = parent
+		next := filepath.Dir(dir)
+		if next == dir {
+			return path
+		}
+		missing = append(missing, filepath.Base(dir))
+		dir = next
 	}
-	return path
+}
+
+// LockRepairMutations is the exported form of lockRepairMutations for desktop
+// handoff helpers that replace release-unit paths outside ApplyRepairPlan.
+func LockRepairMutations(paths ...string) (func(), error) {
+	return lockRepairMutations(paths...)
+}
+
+// LockRepairMutationsTimeout is like LockRepairMutations but waits up to
+// timeout for competing repair or update holders.
+func LockRepairMutationsTimeout(timeout time.Duration, paths ...string) (func(), error) {
+	if timeout <= 0 {
+		timeout = repairMutationLockTimeout
+	}
+	return lockRepairMutationsTimeout(timeout, paths...)
 }
 
 // repairPlanTargetIdentity is a non-reversible identity for a filesystem
@@ -134,6 +159,10 @@ func repairPlanTargetIdentity(path string) string {
 // configuration files, and paths are sorted so multi-target actions cannot
 // deadlock each other.
 func lockRepairMutations(paths ...string) (func(), error) {
+	return lockRepairMutationsTimeout(repairMutationLockTimeout, paths...)
+}
+
+func lockRepairMutationsTimeout(timeout time.Duration, paths ...string) (func(), error) {
 	lockDir := config.RepairMutationLockDir()
 	if lockDir == "" {
 		return nil, fmt.Errorf("lock repair mutations: OS user cache directory is unavailable")
@@ -165,7 +194,10 @@ func lockRepairMutations(paths ...string) (func(), error) {
 	sort.Strings(keys)
 	repairMutationBeforeLock(append([]string(nil), keys...))
 
-	ctx, cancel := context.WithTimeout(context.Background(), repairMutationLockTimeout)
+	if timeout <= 0 {
+		timeout = repairMutationLockTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	releases := make([]func(), 0, len(keys))
 	for _, key := range keys {

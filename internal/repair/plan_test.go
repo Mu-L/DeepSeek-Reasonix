@@ -878,3 +878,98 @@ func TestRepairMutationLockSerializesUpdateRollbackAndPrepare(t *testing.T) {
 		t.Fatalf("target after serialized rollback = %q, %v", got, err)
 	}
 }
+
+func TestRepairPlanPreviewIDDistinguishesLeafSymlinkTargets(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("REASONIX_HOME", home)
+	base := t.TempDir()
+	shared := filepath.Join(base, "shared.toml")
+	if err := os.WriteFile(shared, []byte("[broken\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rootA := filepath.Join(base, "a")
+	rootB := filepath.Join(base, "b")
+	for _, root := range []string{rootA, rootB} {
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(shared, filepath.Join(root, "reasonix.toml")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	plan := RepairPlan{SchemaVersion: 1, Summary: "project", Actions: []RepairPlanAction{{Type: "repair_config", Scope: "project", Reason: "bad toml"}}}
+	previewA, err := PreviewRepairPlan(plan, ApplyPlanOptions{Root: rootA, AllowProject: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	previewB, err := PreviewRepairPlan(plan, ApplyPlanOptions{Root: rootB, AllowProject: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	idA := RepairPlanPreviewID(plan, previewA)
+	idB := RepairPlanPreviewID(plan, previewB)
+	if idA == "" || idA == idB {
+		t.Fatalf("leaf symlink targets must not share previewId: a=%s b=%s", idA, idB)
+	}
+	if _, err := ApplyRepairPlan(plan, ApplyPlanOptions{Root: rootA, AllowProject: true, ExpectedPreviewID: idA}); err != nil {
+		t.Fatalf("confirmed leaf symlink repair failed: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(rootA, "reasonix.toml")); !os.IsNotExist(err) {
+		t.Fatalf("project A symlink was not quarantined: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(rootB, "reasonix.toml")); err != nil {
+		t.Fatalf("project B leaf was touched: %v", err)
+	}
+	if _, err := os.Stat(shared); err != nil {
+		t.Fatalf("shared referent was removed: %v", err)
+	}
+}
+
+func TestApplyRepairPlanRejectsAppBundleInteriorDrift(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("REASONIX_HOME", home)
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := filepath.Join(base, "Reasonix.app")
+	exe := filepath.Join(app, "Contents", "MacOS", "Reasonix")
+	if err := os.MkdirAll(filepath.Dir(exe), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(exe, []byte("old"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	originalExecutable := repairExecutable
+	repairExecutable = func() (string, error) { return exe, nil }
+	t.Cleanup(func() { repairExecutable = originalExecutable })
+
+	backup := app + ".reasonix-update-backup"
+	if err := os.MkdirAll(filepath.Join(backup, "Contents", "MacOS"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(backup, "Contents", "MacOS", "Reasonix"), []byte("backup-old"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := PrepareAppBundleUpdate("v1", "v2", app, backup); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(exe, []byte("new"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	plan := RepairPlan{SchemaVersion: 1, Summary: "rollback", Actions: []RepairPlanAction{{Type: "rollback_update", Reason: "failed update"}}}
+	preview, err := PreviewRepairPlan(plan, ApplyPlanOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := RepairPlanPreviewID(plan, preview)
+	if err := os.WriteFile(exe, []byte("newer-unconfirmed"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ApplyRepairPlan(plan, ApplyPlanOptions{ExpectedPreviewID: expected}); err == nil || !strings.Contains(err.Error(), "preview changed since confirmation") {
+		t.Fatalf("error = %v, want app-bundle interior drift refusal", err)
+	}
+	if got, err := os.ReadFile(exe); err != nil || string(got) != "newer-unconfirmed" {
+		t.Fatalf("unconfirmed bundle interior was rolled back: %q, %v", got, err)
+	}
+}
