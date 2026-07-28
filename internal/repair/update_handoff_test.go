@@ -3,6 +3,7 @@ package repair
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -117,6 +118,7 @@ func TestClaimPendingAppBundleUpdateHandoffRejectsLegacyTransaction(t *testing.T
 	tx, _ := prepareTestAppBundleHandoff(t)
 	tx.HandoffAppPath = ""
 	tx.HandoffStagingPath = ""
+	tx.HandoffAppTreeID = ""
 	tx.HandoffOwnerPID = 0
 	if err := WritePendingUpdate(tx); err != nil {
 		t.Fatal(err)
@@ -158,5 +160,100 @@ func TestClaimPendingAppBundleUpdateHandoffRejectsReplacementWhileLocking(t *tes
 	}
 	if err == nil || !strings.Contains(err.Error(), "changed while waiting") {
 		t.Fatalf("claim error = %v, want replacement rejection", err)
+	}
+}
+
+func TestClaimPendingAppBundleUpdateHandoffRejectsStagedTreeDrift(t *testing.T) {
+	tx, staging := prepareTestAppBundleHandoff(t)
+	if err := os.WriteFile(filepath.Join(tx.HandoffAppPath, "changed-after-prepare"), []byte("tampered"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, release, err := ClaimPendingAppBundleUpdateHandoff(tx.ToVersion, tx.CreatedAt, time.Second)
+	if release != nil {
+		release()
+	}
+	if err == nil || !strings.Contains(err.Error(), "staged bundle changed") {
+		t.Fatalf("claim error = %v, want staged tree drift rejection", err)
+	}
+	if _, err := os.Stat(staging); err != nil {
+		t.Fatalf("staging was removed after rejected claim: %v", err)
+	}
+}
+
+func TestClaimPendingAppBundleUpdateHandoffRejectsOriginalTreeDrift(t *testing.T) {
+	tx, _ := prepareTestAppBundleHandoff(t)
+	if err := os.WriteFile(filepath.Join(tx.TargetPath, "changed-after-prepare"), []byte("tampered"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, release, err := ClaimPendingAppBundleUpdateHandoff(tx.ToVersion, tx.CreatedAt, time.Second)
+	if release != nil {
+		release()
+	}
+	if err == nil || !strings.Contains(err.Error(), "installed bundle changed after prepare") {
+		t.Fatalf("claim error = %v, want original tree drift rejection", err)
+	}
+}
+
+func TestCancelPendingAppBundleUpdateHandoffAfterSourceDrift(t *testing.T) {
+	tx, staging := prepareTestAppBundleHandoff(t)
+	if err := os.WriteFile(filepath.Join(tx.HandoffAppPath, "changed-after-prepare"), []byte("tampered"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, release, err := ClaimPendingAppBundleUpdateHandoff(tx.ToVersion, tx.CreatedAt, time.Second); err == nil {
+		if release != nil {
+			release()
+		}
+		t.Fatal("claim accepted staged source drift")
+	}
+	cancelled, err := CancelPendingAppBundleUpdateHandoff(tx.ToVersion, tx.CreatedAt, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cancelled.CreatedAt != tx.CreatedAt {
+		t.Fatalf("cancelled transaction = %+v, want createdAt %q", cancelled, tx.CreatedAt)
+	}
+	if _, err := ReadPendingUpdate(); !os.IsNotExist(err) {
+		t.Fatalf("pending handoff survived safe cancellation: %v", err)
+	}
+	if _, err := os.Stat(staging); err != nil {
+		t.Fatalf("repair cancellation removed caller-owned staging: %v", err)
+	}
+}
+
+func TestCancelPendingAppBundleUpdateHandoffPreservesDriftedOriginal(t *testing.T) {
+	tx, _ := prepareTestAppBundleHandoff(t)
+	if err := os.WriteFile(filepath.Join(tx.TargetPath, "changed-after-prepare"), []byte("tampered"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CancelPendingAppBundleUpdateHandoff(tx.ToVersion, tx.CreatedAt, time.Second); err == nil ||
+		!strings.Contains(err.Error(), "installed bundle changed after prepare") {
+		t.Fatalf("cancel error = %v, want original drift rejection", err)
+	}
+	if _, err := ReadPendingUpdate(); err != nil {
+		t.Fatalf("pending handoff was lost after unsafe cancellation: %v", err)
+	}
+}
+
+func TestClaimPendingAppBundleUpdateHandoffRejectsStagingSymlinkEscape(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating symlinks requires elevated privileges on Windows CI")
+	}
+	tx, _ := prepareTestAppBundleHandoff(t)
+	outside := filepath.Join(t.TempDir(), "Outside.app")
+	if err := os.MkdirAll(outside, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(tx.HandoffAppPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, tx.HandoffAppPath); err != nil {
+		t.Fatal(err)
+	}
+	_, release, err := ClaimPendingAppBundleUpdateHandoff(tx.ToVersion, tx.CreatedAt, time.Second)
+	if release != nil {
+		release()
+	}
+	if err == nil || !strings.Contains(err.Error(), "resolves outside its staging directory") {
+		t.Fatalf("claim error = %v, want staging containment rejection", err)
 	}
 }

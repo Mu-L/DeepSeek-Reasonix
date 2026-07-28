@@ -19,13 +19,20 @@ import (
 
 const parentExitTimeout = 2 * time.Minute
 
+var (
+	waitForProcessExitFn     = waitForProcessExit
+	runInstallerFn           = runInstaller
+	startRelaunchFn          = startRelaunch
+	claimPendingFileUpdateFn = repair.ClaimPendingFileUpdate
+)
+
 func main() {
 	os.Exit(run(os.Args[1:]))
 }
 
 func run(args []string) int {
 	var parentPID uint
-	var installer, installDir, relaunch, toVersion string
+	var installer, installDir, relaunch, toVersion, createdAt string
 	fs := flag.NewFlagSet("reasonix-update-helper", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	fs.UintVar(&parentPID, "parent-pid", 0, "Reasonix process id to wait for before installing")
@@ -33,6 +40,7 @@ func run(args []string) int {
 	fs.StringVar(&installDir, "install-dir", "", "Reasonix installation directory")
 	fs.StringVar(&relaunch, "relaunch", "", "Reasonix executable to start after the installer succeeds")
 	fs.StringVar(&toVersion, "to-version", "", "Reasonix version being installed")
+	fs.StringVar(&createdAt, "created-at", "", "pending update creation timestamp")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -45,13 +53,33 @@ func run(args []string) int {
 		logger.Print("missing --to-version")
 		return 2
 	}
+	if createdAt == "" {
+		logger.Print("missing --created-at")
+		return 2
+	}
+	if installDir == "" {
+		logger.Print("missing --install-dir")
+		return 2
+	}
+	_, releaseClaim, err := claimPendingFileUpdateFn(
+		toVersion,
+		createdAt,
+		filepath.Join(installDir, "reasonix-desktop.exe"),
+		windowsReleaseUnitPaths(installDir),
+		parentExitTimeout,
+	)
+	if err != nil {
+		logger.Printf("claim pending update: %v", err)
+		return 1
+	}
+	defer releaseClaim()
 	if parentPID != 0 {
-		if err := waitForProcessExit(uint32(parentPID), parentExitTimeout); err != nil {
+		if err := waitForProcessExitFn(uint32(parentPID), parentExitTimeout); err != nil {
 			logger.Printf("wait for parent process %d: %v", parentPID, err)
 			return 1
 		}
 	}
-	if err := runInstaller(installer, installDir); err != nil {
+	if err := runInstallerFn(installer, installDir); err != nil {
 		logger.Printf("run installer: %v", err)
 		// The desktop already exited cleanly, so nothing would notice this
 		// failure: record it and relaunch through Guard, which rolls the
@@ -62,19 +90,38 @@ func run(args []string) int {
 			logger.Printf("record install failure: %v", markErr)
 		}
 		if relaunch != "" {
-			if relaunchErr := startRelaunch(relaunch, installDir); relaunchErr != nil {
+			if relaunchErr := startRelaunchFn(relaunch, installDir); relaunchErr != nil {
 				logger.Printf("relaunch after failed install: %v", relaunchErr)
 			}
 		}
 		return 1
 	}
 	if relaunch != "" {
-		if err := startRelaunch(relaunch, installDir); err != nil {
+		if err := startRelaunchFn(relaunch, installDir); err != nil {
 			logger.Printf("relaunch: %v", err)
 			return 1
 		}
 	}
 	return 0
+}
+
+func windowsReleaseUnitPaths(installDir string) []string {
+	if installDir == "" {
+		return nil
+	}
+	names := []string{
+		"reasonix-desktop.exe",
+		"reasonix-guard.exe",
+		"reasonix-launcher.exe",
+		"reasonix-update-helper.exe",
+		"reasonix-cli.exe",
+		"Reasonix.exe",
+	}
+	paths := make([]string, 0, len(names))
+	for _, name := range names {
+		paths = append(paths, filepath.Join(installDir, name))
+	}
+	return paths
 }
 
 func newLogger() *log.Logger {

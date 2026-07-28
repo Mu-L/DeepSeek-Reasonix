@@ -1,6 +1,7 @@
 package repair
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -10,15 +11,18 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"reasonix/internal/config"
+	"reasonix/internal/filelock"
 	"reasonix/internal/fileutil"
 )
 
 const updateTransactionVersion = 1
+const pendingUpdateLockTimeout = 5 * time.Second
 
 var repairExecutable = os.Executable
 
@@ -43,7 +47,11 @@ type UpdateTransaction struct {
 	// transactions written by older releases remain readable.
 	HandoffAppPath     string `json:"handoffAppPath,omitempty"`
 	HandoffStagingPath string `json:"handoffStagingPath,omitempty"`
+	HandoffAppTreeID   string `json:"handoffAppTreeId,omitempty"`
 	HandoffOwnerPID    int    `json:"handoffOwnerPid,omitempty"`
+	// BackupTreeID binds a macOS rollback backup to the bundle captured before
+	// the update. It remains optional for legacy transactions.
+	BackupTreeID string `json:"backupTreeId,omitempty"`
 }
 
 type UpdateTransactionFile struct {
@@ -86,22 +94,16 @@ func lockPendingUpdateStrict() (func(), error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
-	unlock, err := lockRepairStateFile(path)
+	ctx, cancel := context.WithTimeout(context.Background(), pendingUpdateLockTimeout)
+	defer cancel()
+	unlock, err := filelock.Acquire(ctx, path+".lock")
 	if err != nil {
 		return nil, err
 	}
 	return unlock, nil
 }
 
-// Existing startup recovery paths retain their historical best-effort lock
-// behavior. Security-sensitive handoff authorization uses the strict form.
-func lockPendingUpdate() func() {
-	unlock, err := lockPendingUpdateStrict()
-	if err != nil {
-		return func() {}
-	}
-	return unlock
-}
+var acquirePendingUpdateLock = lockPendingUpdateStrict
 
 // PrepareFileUpdate snapshots the current desktop executable — plus any sibling
 // binaries of the release unit the installer also replaces (Guard, launcher,
@@ -117,7 +119,10 @@ func PrepareFileUpdate(fromVersion, toVersion, targetPath string, siblingPaths .
 	if root == "" {
 		return nil, fmt.Errorf("prepare update: Reasonix state directory is unavailable")
 	}
-	unlock := lockPendingUpdate()
+	unlock, err := acquirePendingUpdateLock()
+	if err != nil {
+		return nil, fmt.Errorf("prepare update: lock pending transaction: %w", err)
+	}
 	defer unlock()
 	// Hold the same target locks as rollback so prepare/snapshot cannot race
 	// a concurrent Guard restore of the release unit.
@@ -130,6 +135,9 @@ func PrepareFileUpdate(fromVersion, toVersion, targetPath string, siblingPaths .
 	backupDir := filepath.Join(root, "repair", "updates")
 	if err := os.MkdirAll(backupDir, 0o700); err != nil {
 		return nil, err
+	}
+	if !pathInsideResolvedRoot(filepath.Join(root, "repair"), backupDir) {
+		return nil, fmt.Errorf("prepare update: backup directory resolves outside the repair directory")
 	}
 	tx := &UpdateTransaction{
 		SchemaVersion: updateTransactionVersion,
@@ -180,13 +188,20 @@ func PrepareAppBundleUpdate(fromVersion, toVersion, appPath, backupPath string) 
 	if err != nil {
 		return nil, err
 	}
-	unlock := lockPendingUpdate()
+	unlock, err := acquirePendingUpdateLock()
+	if err != nil {
+		return nil, fmt.Errorf("prepare update: lock pending transaction: %w", err)
+	}
 	defer unlock()
-	unlockTargets, lockErr := lockRepairMutations(tx.TargetPath)
+	unlockTargets, lockErr := lockRepairMutations(tx.TargetPath, tx.BackupPath)
 	if lockErr != nil {
 		return nil, fmt.Errorf("prepare update: lock targets: %w", lockErr)
 	}
 	defer unlockTargets()
+	tx.BackupTreeID, err = repairPlanTreeContentStateID(tx.TargetPath)
+	if err != nil {
+		return nil, fmt.Errorf("prepare update: current bundle digest: %w", err)
+	}
 	if err := WritePendingUpdate(tx); err != nil {
 		return nil, err
 	}
@@ -211,7 +226,7 @@ func PrepareAppBundleUpdateHandoff(fromVersion, toVersion, appPath, backupPath, 
 		return nil, fmt.Errorf("prepare update: %w", err)
 	}
 
-	unlock, err := lockPendingUpdateStrict()
+	unlock, err := acquirePendingUpdateLock()
 	if err != nil {
 		return nil, fmt.Errorf("prepare update: lock pending transaction: %w", err)
 	}
@@ -221,6 +236,14 @@ func PrepareAppBundleUpdateHandoff(fromVersion, toVersion, appPath, backupPath, 
 		return nil, fmt.Errorf("prepare update: lock targets: %w", err)
 	}
 	defer unlockTargets()
+	tx.HandoffAppTreeID, err = repairPlanTreeContentStateID(tx.HandoffAppPath)
+	if err != nil {
+		return nil, fmt.Errorf("prepare update: stage bundle digest: %w", err)
+	}
+	tx.BackupTreeID, err = repairPlanTreeContentStateID(tx.TargetPath)
+	if err != nil {
+		return nil, fmt.Errorf("prepare update: current bundle digest: %w", err)
+	}
 	if err := WritePendingUpdate(tx); err != nil {
 		return nil, err
 	}
@@ -254,7 +277,7 @@ func ClaimPendingAppBundleUpdateHandoff(expectedToVersion, expectedCreatedAt str
 	if expectedToVersion == "" || expectedCreatedAt == "" {
 		return nil, nil, fmt.Errorf("claim update handoff: transaction identity is incomplete")
 	}
-	unlockPending, err := lockPendingUpdateStrict()
+	unlockPending, err := acquirePendingUpdateLock()
 	if err != nil {
 		return nil, nil, fmt.Errorf("claim update handoff: lock pending transaction: %w", err)
 	}
@@ -297,6 +320,14 @@ func ClaimPendingAppBundleUpdateHandoff(expectedToVersion, expectedCreatedAt str
 		unlockTargets()
 		return fail(fmt.Errorf("claim update handoff: pending transaction changed while waiting"))
 	}
+	if err := VerifyAppBundleUpdateHandoffSource(current); err != nil {
+		unlockTargets()
+		return fail(fmt.Errorf("claim update handoff: %w", err))
+	}
+	if err := VerifyAppBundleUpdateHandoffOriginal(current); err != nil {
+		unlockTargets()
+		return fail(fmt.Errorf("claim update handoff: %w", err))
+	}
 
 	var once sync.Once
 	release := func() {
@@ -306,6 +337,258 @@ func ClaimPendingAppBundleUpdateHandoff(expectedToVersion, expectedCreatedAt str
 		})
 	}
 	return current, release, nil
+}
+
+// ClaimPendingFileUpdate binds an updater's actual replacement window to the
+// exact transaction and release-unit paths prepared by the desktop. The
+// launcher path is explicit because the Windows helper runs from a cache
+// directory rather than from the installation it is authorized to replace.
+func ClaimPendingFileUpdate(
+	expectedToVersion, expectedCreatedAt, launcherPath string,
+	expectedTargetPaths []string,
+	timeout time.Duration,
+) (*UpdateTransaction, func(), error) {
+	expectedToVersion = strings.TrimSpace(expectedToVersion)
+	expectedCreatedAt = strings.TrimSpace(expectedCreatedAt)
+	launcherPath = filepath.Clean(strings.TrimSpace(launcherPath))
+	if expectedToVersion == "" || expectedCreatedAt == "" || launcherPath == "" || launcherPath == "." {
+		return nil, nil, fmt.Errorf("claim file update: transaction identity is incomplete")
+	}
+	if len(expectedTargetPaths) == 0 {
+		return nil, nil, fmt.Errorf("claim file update: release unit is empty")
+	}
+
+	unlockPending, err := acquirePendingUpdateLock()
+	if err != nil {
+		return nil, nil, fmt.Errorf("claim file update: lock pending transaction: %w", err)
+	}
+	fail := func(err error) (*UpdateTransaction, func(), error) {
+		unlockPending()
+		return nil, nil, err
+	}
+	tx, err := readPendingUpdateForLauncher(launcherPath)
+	if err != nil {
+		return fail(fmt.Errorf("claim file update: read pending transaction: %w", err))
+	}
+	if tx.TargetKind != "file" ||
+		strings.TrimSpace(tx.ToVersion) != expectedToVersion ||
+		strings.TrimSpace(tx.CreatedAt) != expectedCreatedAt {
+		return fail(fmt.Errorf("claim file update: pending transaction does not match"))
+	}
+	if tx.Platform != runtime.GOOS+"/"+runtime.GOARCH {
+		return fail(fmt.Errorf("claim file update: pending transaction platform does not match"))
+	}
+	targetPaths := pendingUpdateTargetPaths(tx)
+	if !sameRepairMutationPaths(targetPaths, expectedTargetPaths) {
+		return fail(fmt.Errorf("claim file update: release unit does not match"))
+	}
+
+	unlockTargets, err := lockRepairMutationsTimeout(timeout, targetPaths...)
+	if err != nil {
+		return fail(fmt.Errorf("claim file update: lock targets: %w", err))
+	}
+	current, err := readPendingUpdateForLauncher(launcherPath)
+	if err != nil {
+		unlockTargets()
+		return fail(fmt.Errorf("claim file update: re-read pending transaction: %w", err))
+	}
+	if !reflect.DeepEqual(tx, current) {
+		unlockTargets()
+		return fail(fmt.Errorf("claim file update: pending transaction changed while waiting"))
+	}
+
+	var once sync.Once
+	release := func() {
+		once.Do(func() {
+			unlockTargets()
+			unlockPending()
+		})
+	}
+	return current, release, nil
+}
+
+// CancelPendingAppBundleUpdateHandoff abandons an exact handoff only when the
+// original installed bundle is still the tree captured during prepare. This is
+// the safe recovery path when source verification fails after the desktop has
+// exited but before any bundle swap occurred.
+func CancelPendingAppBundleUpdateHandoff(
+	expectedToVersion, expectedCreatedAt string,
+	timeout time.Duration,
+) (*UpdateTransaction, error) {
+	expectedToVersion = strings.TrimSpace(expectedToVersion)
+	expectedCreatedAt = strings.TrimSpace(expectedCreatedAt)
+	if expectedToVersion == "" || expectedCreatedAt == "" {
+		return nil, fmt.Errorf("cancel update handoff: transaction identity is incomplete")
+	}
+	unlockPending, err := acquirePendingUpdateLock()
+	if err != nil {
+		return nil, fmt.Errorf("cancel update handoff: lock pending transaction: %w", err)
+	}
+	defer unlockPending()
+	tx, err := ReadPendingUpdate()
+	if err != nil {
+		return nil, fmt.Errorf("cancel update handoff: read pending transaction: %w", err)
+	}
+	if tx.TargetKind != "app-bundle" ||
+		strings.TrimSpace(tx.ToVersion) != expectedToVersion ||
+		strings.TrimSpace(tx.CreatedAt) != expectedCreatedAt {
+		return nil, fmt.Errorf("cancel update handoff: pending transaction does not match")
+	}
+	unlockTargets, err := lockRepairMutationsTimeout(timeout, tx.TargetPath, tx.BackupPath)
+	if err != nil {
+		return nil, fmt.Errorf("cancel update handoff: lock targets: %w", err)
+	}
+	defer unlockTargets()
+	current, err := ReadPendingUpdate()
+	if err != nil {
+		return nil, fmt.Errorf("cancel update handoff: re-read pending transaction: %w", err)
+	}
+	if !reflect.DeepEqual(tx, current) {
+		return nil, fmt.Errorf("cancel update handoff: pending transaction changed while waiting")
+	}
+	if err := VerifyAppBundleUpdateHandoffOriginal(current); err != nil {
+		return nil, fmt.Errorf("cancel update handoff: %w", err)
+	}
+	if err := os.Remove(PendingUpdatePath()); err != nil && !os.IsNotExist(err) {
+		return nil, err
+	}
+	removeUpdateBackups(current)
+	return current, nil
+}
+
+func sameRepairMutationPaths(a, b []string) bool {
+	keys := func(paths []string) []string {
+		seen := make(map[string]struct{}, len(paths))
+		result := make([]string, 0, len(paths))
+		for _, path := range paths {
+			key := canonicalRepairPath(path)
+			if key == "" {
+				continue
+			}
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			result = append(result, key)
+		}
+		sort.Strings(result)
+		return result
+	}
+	return reflect.DeepEqual(keys(a), keys(b))
+}
+
+// VerifyAppBundleUpdateHandoffSource checks the real staging containment and
+// the complete staged tree immediately before a handoff mutates the install.
+// The lexical metadata check remains readable after staging cleanup, while this
+// stronger check is only used while the source bundle still exists.
+func VerifyAppBundleUpdateHandoffSource(tx *UpdateTransaction) error {
+	if tx == nil || tx.TargetKind != "app-bundle" {
+		return fmt.Errorf("handoff source transaction is invalid")
+	}
+	if strings.TrimSpace(tx.HandoffAppTreeID) == "" {
+		return fmt.Errorf("handoff source digest is missing")
+	}
+	if err := validateAppBundleHandoffSourcePaths(tx); err != nil {
+		return err
+	}
+	actual, err := repairPlanTreeContentStateID(tx.HandoffAppPath)
+	if err != nil {
+		return fmt.Errorf("read staged bundle digest: %w", err)
+	}
+	if actual != tx.HandoffAppTreeID {
+		return fmt.Errorf("staged bundle changed after verification")
+	}
+	return nil
+}
+
+// VerifyAppBundleUpdateHandoffTarget proves that the bytes copied into the
+// installed bundle are the same tree that was verified in staging.
+func VerifyAppBundleUpdateHandoffTarget(tx *UpdateTransaction) error {
+	if tx == nil || tx.TargetKind != "app-bundle" {
+		return fmt.Errorf("handoff target transaction is invalid")
+	}
+	if strings.TrimSpace(tx.HandoffAppTreeID) == "" {
+		return fmt.Errorf("handoff target digest is missing")
+	}
+	actual, err := repairPlanTreeContentStateID(tx.TargetPath)
+	if err != nil {
+		return fmt.Errorf("read installed bundle digest: %w", err)
+	}
+	if actual != tx.HandoffAppTreeID {
+		return fmt.Errorf("installed bundle differs from verified staging")
+	}
+	return nil
+}
+
+// VerifyAppBundleUpdateHandoffOriginal checks that the installed bundle about
+// to become the rollback backup is still the tree captured during prepare.
+func VerifyAppBundleUpdateHandoffOriginal(tx *UpdateTransaction) error {
+	if tx == nil || tx.TargetKind != "app-bundle" {
+		return fmt.Errorf("handoff original transaction is invalid")
+	}
+	return verifyAppBundleUpdateTree(tx.TargetPath, tx.BackupTreeID, "installed bundle changed after prepare")
+}
+
+// VerifyAppBundleUpdateHandoffBackup checks the node produced by the
+// target-to-backup rename before the replacement bundle is copied into place.
+func VerifyAppBundleUpdateHandoffBackup(tx *UpdateTransaction) error {
+	if tx == nil || tx.TargetKind != "app-bundle" {
+		return fmt.Errorf("handoff backup transaction is invalid")
+	}
+	return verifyAppBundleUpdateTree(tx.BackupPath, tx.BackupTreeID, "rollback backup differs from prepared bundle")
+}
+
+func verifyAppBundleUpdateTree(path, expected, mismatch string) error {
+	if strings.TrimSpace(expected) == "" {
+		return fmt.Errorf("original bundle digest is missing")
+	}
+	actual, err := repairPlanTreeContentStateID(path)
+	if err != nil {
+		return fmt.Errorf("read original bundle digest: %w", err)
+	}
+	if actual != expected {
+		return fmt.Errorf("%s", mismatch)
+	}
+	return nil
+}
+
+// AppBundleTreeDigest exposes the deterministic bundle-content digest to the
+// desktop handoff tests and other platform glue without exposing path identity.
+func AppBundleTreeDigest(path string) (string, error) {
+	return repairPlanTreeContentStateID(path)
+}
+
+func validateAppBundleHandoffSourcePaths(tx *UpdateTransaction) error {
+	staging, err := filepath.EvalSymlinks(tx.HandoffStagingPath)
+	if err != nil {
+		return fmt.Errorf("resolve handoff staging directory: %w", err)
+	}
+	app, err := filepath.EvalSymlinks(tx.HandoffAppPath)
+	if err != nil {
+		return fmt.Errorf("resolve handoff app bundle: %w", err)
+	}
+	tempRoot, err := filepath.EvalSymlinks(os.TempDir())
+	if err != nil {
+		return fmt.Errorf("resolve temporary directory: %w", err)
+	}
+	within := func(root, path string) bool {
+		rel, relErr := filepath.Rel(root, path)
+		return relErr == nil && rel != "." && rel != ".." &&
+			!strings.HasPrefix(rel, ".."+string(filepath.Separator))
+	}
+	if !within(tempRoot, staging) {
+		return fmt.Errorf("handoff staging directory resolves outside the system temporary directory")
+	}
+	if !within(staging, app) {
+		return fmt.Errorf("handoff app bundle resolves outside its staging directory")
+	}
+	if info, statErr := os.Stat(app); statErr != nil || !info.IsDir() {
+		if statErr != nil {
+			return fmt.Errorf("handoff app bundle is unavailable: %w", statErr)
+		}
+		return fmt.Errorf("handoff app bundle is not a directory")
+	}
+	return nil
 }
 
 // ClearClaimedAppBundleUpdateHandoff removes a failed handoff transaction.
@@ -340,6 +623,28 @@ func WritePendingUpdate(tx *UpdateTransaction) error {
 }
 
 func ReadPendingUpdate() (*UpdateTransaction, error) {
+	tx, err := readPendingUpdateUnchecked()
+	if err != nil {
+		return nil, err
+	}
+	if err := validateUpdateTransaction(tx); err != nil {
+		return nil, err
+	}
+	return tx, nil
+}
+
+func readPendingUpdateForLauncher(launcherPath string) (*UpdateTransaction, error) {
+	tx, err := readPendingUpdateUnchecked()
+	if err != nil {
+		return nil, err
+	}
+	if err := validateUpdateTransactionForLauncher(tx, launcherPath); err != nil {
+		return nil, err
+	}
+	return tx, nil
+}
+
+func readPendingUpdateUnchecked() (*UpdateTransaction, error) {
 	path := PendingUpdatePath()
 	if path == "" {
 		return nil, os.ErrNotExist
@@ -350,9 +655,6 @@ func ReadPendingUpdate() (*UpdateTransaction, error) {
 	}
 	var tx UpdateTransaction
 	if err := json.Unmarshal(b, &tx); err != nil {
-		return nil, err
-	}
-	if err := validateUpdateTransaction(&tx); err != nil {
 		return nil, err
 	}
 	return &tx, nil
@@ -366,7 +668,10 @@ func HasPendingUpdate() bool {
 // MarkUpdateHealthy commits a probationary update and removes its backup. A
 // version mismatch is ignored so an older process cannot bless a newer update.
 func MarkUpdateHealthy(runningVersion string) error {
-	unlock := lockPendingUpdate()
+	unlock, err := acquirePendingUpdateLock()
+	if err != nil {
+		return fmt.Errorf("mark update healthy: lock pending transaction: %w", err)
+	}
 	defer unlock()
 	tx, err := ReadPendingUpdate()
 	if err != nil {
@@ -378,6 +683,11 @@ func MarkUpdateHealthy(runningVersion string) error {
 	if strings.TrimSpace(runningVersion) != strings.TrimSpace(tx.ToVersion) {
 		return nil
 	}
+	unlockTargets, lockErr := lockRepairMutations(pendingUpdateTargetPaths(tx)...)
+	if lockErr != nil {
+		return fmt.Errorf("mark update healthy: lock targets: %w", lockErr)
+	}
+	defer unlockTargets()
 	if err := os.Remove(PendingUpdatePath()); err != nil && !os.IsNotExist(err) {
 		return err
 	}
@@ -388,7 +698,10 @@ func MarkUpdateHealthy(runningVersion string) error {
 // CancelPendingUpdate removes a transaction that failed before control was
 // handed to the replacement build. A version mismatch is intentionally inert.
 func CancelPendingUpdate(toVersion string) error {
-	unlock := lockPendingUpdate()
+	unlock, err := acquirePendingUpdateLock()
+	if err != nil {
+		return fmt.Errorf("cancel pending update: lock pending transaction: %w", err)
+	}
 	defer unlock()
 	tx, err := ReadPendingUpdate()
 	if err != nil {
@@ -400,6 +713,11 @@ func CancelPendingUpdate(toVersion string) error {
 	if strings.TrimSpace(toVersion) != strings.TrimSpace(tx.ToVersion) {
 		return nil
 	}
+	unlockTargets, lockErr := lockRepairMutations(pendingUpdateTargetPaths(tx)...)
+	if lockErr != nil {
+		return fmt.Errorf("cancel pending update: lock targets: %w", lockErr)
+	}
+	defer unlockTargets()
 	if err := os.Remove(PendingUpdatePath()); err != nil && !os.IsNotExist(err) {
 		return err
 	}
@@ -440,9 +758,13 @@ func rollbackPendingUpdateState(expectedStateID string) (UpdateRollbackResult, e
 }
 
 func rollbackPendingUpdateMatching(expectedToVersion, expectedCreatedAt, expectedStateID string) (UpdateRollbackResult, error) {
-	// The expected-match checks below re-run under the lock, so a transaction
-	// committed, cancelled, or replaced while waiting here is never acted upon.
-	unlock := lockPendingUpdate()
+	// The expected-match checks below re-run under the strict lock, so a
+	// transaction committed, cancelled, or replaced while waiting here is never
+	// acted upon.
+	unlock, err := acquirePendingUpdateLock()
+	if err != nil {
+		return UpdateRollbackResult{}, fmt.Errorf("rollback update: lock pending transaction: %w", err)
+	}
 	defer unlock()
 	tx, err := ReadPendingUpdate()
 	if err != nil {
@@ -501,13 +823,30 @@ func rollbackPendingUpdateMatching(expectedToVersion, expectedCreatedAt, expecte
 		if _, err := os.Stat(tx.BackupPath); err != nil {
 			return result, fmt.Errorf("rollback update: backup bundle: %w", err)
 		}
+		if tx.BackupTreeID != "" {
+			actual, digestErr := repairPlanTreeContentStateID(tx.BackupPath)
+			if digestErr != nil || actual != tx.BackupTreeID {
+				return result, fmt.Errorf("rollback update: backup bundle digest mismatch")
+			}
+		}
 		failed := tx.TargetPath + ".reasonix-failed-" + time.Now().UTC().Format("20060102T150405Z")
-		if err := os.Rename(tx.TargetPath, failed); err != nil {
-			return result, fmt.Errorf("rollback update: move failed bundle: %w", err)
+		retainedFailed := false
+		if _, statErr := os.Lstat(tx.TargetPath); statErr == nil {
+			if err := os.Rename(tx.TargetPath, failed); err != nil {
+				return result, fmt.Errorf("rollback update: move failed bundle: %w", err)
+			}
+			retainedFailed = true
+		} else if !os.IsNotExist(statErr) {
+			return result, fmt.Errorf("rollback update: inspect live bundle: %w", statErr)
 		}
 		if err := os.Rename(tx.BackupPath, tx.TargetPath); err != nil {
-			_ = os.Rename(failed, tx.TargetPath)
+			if retainedFailed {
+				_ = os.Rename(failed, tx.TargetPath)
+			}
 			return result, fmt.Errorf("rollback update: restore bundle: %w", err)
+		}
+		if retainedFailed {
+			_ = os.RemoveAll(failed)
 		}
 	default:
 		return result, fmt.Errorf("rollback update: unsupported target kind %q", tx.TargetKind)
@@ -641,7 +980,7 @@ func allowedUpdateTargetBase(base string, primary bool) bool {
 		return primary
 	case "reasonix.exe":
 		return true
-	case "reasonix-guard", "reasonix-guard.exe", "reasonix-launcher.exe", "reasonix-update-helper.exe", "reasonix-cli.exe":
+	case "reasonix", "reasonix-guard", "reasonix-guard.exe", "reasonix-launcher.exe", "reasonix-update-helper.exe", "reasonix-cli.exe":
 		return !primary
 	default:
 		return false
@@ -652,10 +991,21 @@ func validateUpdateTransaction(tx *UpdateTransaction) error {
 	if tx == nil || tx.SchemaVersion != updateTransactionVersion || strings.TrimSpace(tx.ToVersion) == "" {
 		return fmt.Errorf("pending update metadata is incomplete")
 	}
-	tx.TargetPath = filepath.Clean(tx.TargetPath)
-	tx.BackupPath = filepath.Clean(tx.BackupPath)
 	launcher, err := repairExecutable()
 	if err != nil {
+		return fmt.Errorf("pending update launcher path is unavailable")
+	}
+	return validateUpdateTransactionForLauncher(tx, launcher)
+}
+
+func validateUpdateTransactionForLauncher(tx *UpdateTransaction, launcher string) error {
+	if tx == nil || tx.SchemaVersion != updateTransactionVersion || strings.TrimSpace(tx.ToVersion) == "" {
+		return fmt.Errorf("pending update metadata is incomplete")
+	}
+	tx.TargetPath = filepath.Clean(tx.TargetPath)
+	tx.BackupPath = filepath.Clean(tx.BackupPath)
+	launcher = filepath.Clean(strings.TrimSpace(launcher))
+	if launcher == "" || launcher == "." {
 		return fmt.Errorf("pending update launcher path is unavailable")
 	}
 	if resolved, resolveErr := filepath.EvalSymlinks(launcher); resolveErr == nil {
@@ -667,13 +1017,14 @@ func validateUpdateTransaction(tx *UpdateTransaction) error {
 		if !allowedUpdateTargetBase(filepath.Base(tx.TargetPath), true) {
 			return fmt.Errorf("pending update target is not a Reasonix executable")
 		}
-		if filepath.Dir(launcher) != filepath.Dir(tx.TargetPath) {
+		launcherKey := canonicalRepairPath(launcher)
+		targetKey := canonicalRepairPath(tx.TargetPath)
+		if launcherKey == "" || targetKey == "" || filepath.Dir(launcherKey) != filepath.Dir(targetKey) {
 			return fmt.Errorf("pending update target is outside the current Guard installation")
 		}
 		root := filepath.Clean(filepath.Join(config.MemoryUserDir(), "repair"))
 		insideRepairDir := func(path string) bool {
-			rel, err := filepath.Rel(root, path)
-			return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+			return pathInsideResolvedRoot(root, path)
 		}
 		if !insideRepairDir(tx.BackupPath) {
 			return fmt.Errorf("pending update backup is outside the repair directory")
@@ -730,12 +1081,36 @@ func validateUpdateTransaction(tx *UpdateTransaction) error {
 	return nil
 }
 
+func pathInsideResolvedRoot(root, path string) bool {
+	root = filepath.Clean(strings.TrimSpace(root))
+	path = filepath.Clean(strings.TrimSpace(path))
+	if root == "" || path == "" {
+		return false
+	}
+	lexicalRel, err := filepath.Rel(root, path)
+	if err != nil || lexicalRel == ".." || strings.HasPrefix(lexicalRel, ".."+string(filepath.Separator)) {
+		return false
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return false
+	}
+	resolvedPath, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return false
+	}
+	resolvedRel, err := filepath.Rel(resolvedRoot, resolvedPath)
+	return err == nil && resolvedRel != ".." &&
+		!strings.HasPrefix(resolvedRel, ".."+string(filepath.Separator))
+}
+
 func validateAppBundleHandoffMetadata(tx *UpdateTransaction) error {
 	if tx == nil {
 		return fmt.Errorf("handoff metadata is incomplete")
 	}
 	hasAny := strings.TrimSpace(tx.HandoffAppPath) != "" ||
 		strings.TrimSpace(tx.HandoffStagingPath) != "" ||
+		strings.TrimSpace(tx.HandoffAppTreeID) != "" ||
 		tx.HandoffOwnerPID != 0
 	if !hasAny {
 		return nil

@@ -3,6 +3,7 @@ package repair
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -72,6 +73,58 @@ func TestPendingUpdateRejectsUnexpectedReleaseFile(t *testing.T) {
 		if _, err := ReadPendingUpdate(); err == nil {
 			t.Fatalf("release file entry %+v was accepted", file)
 		}
+	}
+}
+
+func TestPendingUpdateRejectsBackupSymlinkEscape(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating symlinks requires elevated privileges on Windows CI")
+	}
+	home := t.TempDir()
+	t.Setenv("REASONIX_HOME", home)
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "reasonix-desktop")
+	guard := filepath.Join(dir, "reasonix-guard")
+	originalExecutable := repairExecutable
+	repairExecutable = func() (string, error) { return guard, nil }
+	t.Cleanup(func() { repairExecutable = originalExecutable })
+
+	repairDir := filepath.Join(home, "repair")
+	if err := os.MkdirAll(repairDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(repairDir, "updates")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte("old"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := PrepareFileUpdate("v1", "v2", target); err == nil {
+		t.Fatal("prepare update wrote a backup through a symlink outside the repair directory")
+	}
+	backup := filepath.Join(repairDir, "updates", "reasonix-desktop.previous")
+	if err := os.WriteFile(backup, []byte("old"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tx := &UpdateTransaction{
+		SchemaVersion: updateTransactionVersion,
+		ToVersion:     "v2",
+		Platform:      runtime.GOOS + "/" + runtime.GOARCH,
+		TargetKind:    "file",
+		TargetPath:    target,
+		BackupPath:    backup,
+		BackupSHA256:  "deadbeef",
+		CreatedAt:     time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	if err := WritePendingUpdate(tx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadPendingUpdate(); err == nil {
+		t.Fatal("pending update accepted a backup that resolves outside the repair directory")
 	}
 }
 
@@ -155,6 +208,38 @@ func TestPendingUpdateAcceptsWindowsReleaseUnit(t *testing.T) {
 		if got := filepath.Base(file.TargetPath); got != names[i] {
 			t.Fatalf("release unit file %d = %q, want %q", i, got, names[i])
 		}
+	}
+}
+
+func TestPendingUpdateAcceptsLinuxReleaseUnit(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("REASONIX_HOME", home)
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalExecutable := repairExecutable
+	repairExecutable = func() (string, error) { return filepath.Join(dir, "reasonix-guard"), nil }
+	t.Cleanup(func() { repairExecutable = originalExecutable })
+
+	names := []string{"reasonix-desktop", "reasonix-guard", "reasonix"}
+	paths := make([]string, 0, len(names))
+	for _, name := range names {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		paths = append(paths, path)
+	}
+	if _, err := PrepareFileUpdate("v1", "v2", paths[0], paths[1:]...); err != nil {
+		t.Fatalf("prepare Linux release unit: %v", err)
+	}
+	tx, err := ReadPendingUpdate()
+	if err != nil {
+		t.Fatalf("read Linux release unit: %v", err)
+	}
+	if len(tx.Files) != len(names) {
+		t.Fatalf("release unit files = %d, want %d: %+v", len(tx.Files), len(names), tx.Files)
 	}
 }
 

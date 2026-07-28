@@ -565,17 +565,18 @@ func repairPlanReleaseNodeState(path string) string {
 	return repairPlanFileState(path)
 }
 
-func repairPlanTreeStateID(root string) string {
-	type treeEntry struct {
-		Rel     string `json:"rel"`
-		Kind    string `json:"kind"`
-		Mode    uint32 `json:"mode,omitempty"`
-		Content string `json:"content,omitempty"`
-	}
-	entries := make([]treeEntry, 0, 64)
-	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+type repairPlanTreeEntry struct {
+	Rel     string `json:"rel"`
+	Kind    string `json:"kind"`
+	Mode    uint32 `json:"mode,omitempty"`
+	Content string `json:"content,omitempty"`
+}
+
+func repairPlanTreeEntries(root string) ([]repairPlanTreeEntry, error) {
+	entries := make([]repairPlanTreeEntry, 0, 64)
+	walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			entries = append(entries, treeEntry{Rel: path, Kind: "unreadable"})
+			entries = append(entries, repairPlanTreeEntry{Rel: path, Kind: "unreadable"})
 			return nil
 		}
 		rel, relErr := filepath.Rel(root, path)
@@ -587,10 +588,10 @@ func repairPlanTreeStateID(root string) string {
 		}
 		info, infoErr := d.Info()
 		if infoErr != nil {
-			entries = append(entries, treeEntry{Rel: rel, Kind: "unreadable"})
+			entries = append(entries, repairPlanTreeEntry{Rel: rel, Kind: "unreadable"})
 			return nil
 		}
-		entry := treeEntry{Rel: filepath.ToSlash(rel), Mode: uint32(info.Mode())}
+		entry := repairPlanTreeEntry{Rel: filepath.ToSlash(rel), Mode: uint32(info.Mode())}
 		switch {
 		case info.Mode()&os.ModeSymlink != 0:
 			entry.Kind = "symlink"
@@ -620,9 +621,44 @@ func repairPlanTreeStateID(root string) string {
 		}
 		return entries[i].Rel < entries[j].Rel
 	})
+	return entries, walkErr
+}
+
+// repairPlanTreeContentStateID hashes a directory tree without binding its
+// root path. This lets an update handoff prove that the staged bundle and the
+// installed bundle contain the same bytes even though they live at different
+// paths.
+func repairPlanTreeContentStateID(root string) (string, error) {
+	info, err := os.Lstat(root)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("expected directory, got %s", info.Mode().Type())
+	}
+	entries, err := repairPlanTreeEntries(root)
+	if err != nil {
+		return "", err
+	}
+	for _, entry := range entries {
+		switch entry.Kind {
+		case "unreadable", "file-unreadable", "symlink-unreadable":
+			return "", fmt.Errorf("cannot read bundle entry %q", entry.Rel)
+		case "other":
+			return "", fmt.Errorf("unsupported bundle entry %q", entry.Rel)
+		}
+	}
+	return repairPlanStateID(entries), nil
+}
+
+func repairPlanTreeStateID(root string) string {
+	entries, err := repairPlanTreeEntries(root)
+	if err != nil {
+		entries = []repairPlanTreeEntry{{Rel: root, Kind: "unreadable"}}
+	}
 	return repairPlanStateID(struct {
-		Target  string      `json:"target"`
-		Entries []treeEntry `json:"entries"`
+		Target  string                `json:"target"`
+		Entries []repairPlanTreeEntry `json:"entries"`
 	}{repairPlanTargetIdentity(root), entries})
 }
 
@@ -662,6 +698,9 @@ func pendingUpdateTargetPaths(tx *UpdateTransaction) []string {
 		add(f.TargetPath)
 	}
 	add(tx.TargetPath)
+	if strings.EqualFold(strings.TrimSpace(tx.TargetKind), "app-bundle") {
+		add(tx.BackupPath)
+	}
 	return paths
 }
 

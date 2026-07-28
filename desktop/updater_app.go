@@ -216,23 +216,26 @@ func (a *App) installDebUpdate(meta *cachedUpdate) error {
 
 func (a *App) installPortableUpdate(meta *cachedUpdate, data []byte) error {
 	a.emitProgress("installing", meta.Size, meta.Size, "")
+	var preparedUpdate *repair.UpdateTransaction
 	if runtime.GOOS == "windows" || runtime.GOOS == "linux" {
 		// Back up the complete release unit (main binary + Guard/launcher
 		// siblings the installer also replaces) so rollback never leaves a
 		// mixed-version install. Deb installs deliberately skip this — Guard
 		// cannot rewrite /usr/bin and would corrupt dpkg state.
-		if _, err := repair.PrepareFileUpdate(version, meta.Version, currentExecutablePath(), updateSiblingArtifacts()...); err != nil {
+		var err error
+		preparedUpdate, err = repair.PrepareFileUpdate(version, meta.Version, currentExecutablePath(), updateSiblingArtifacts()...)
+		if err != nil {
 			return a.failUpdate(err)
 		}
 	}
 	var err error
 	switch runtime.GOOS {
 	case "windows":
-		err = applyWindowsFile(meta.Path, meta.Version)
+		err = applyWindowsFile(meta.Path, preparedUpdate)
 	case "darwin":
 		err = applyMac(meta.Path, meta.Version)
 	case "linux":
-		err = applyLinux(data)
+		err = applyLinux(data, preparedUpdate)
 	default:
 		err = fmt.Errorf("self-update unsupported on %s", runtime.GOOS)
 	}

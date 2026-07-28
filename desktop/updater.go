@@ -27,6 +27,7 @@ import (
 	"reasonix/desktop/internal/update"
 	"reasonix/internal/config"
 	"reasonix/internal/netclient"
+	"reasonix/internal/repair"
 )
 
 // updater.go is the transport-free core of the desktop auto-updater: manifest
@@ -801,7 +802,7 @@ func extractBinary(targz []byte, name string) ([]byte, error) {
 
 // applyLinux replaces the running binary with the one inside the downloaded
 // tar.gz; the caller relaunches afterwards.
-func applyLinux(targz []byte) error {
+func applyLinux(targz []byte, prepared *repair.UpdateTransaction) error {
 	bin, err := extractBinary(targz, "reasonix-desktop")
 	if err != nil {
 		return err
@@ -814,10 +815,31 @@ func applyLinux(targz []byte) error {
 	if err != nil {
 		return err
 	}
-	exe := currentExecutablePath()
+	exe := currentExecutablePathForLinux()
 	if exe == "" {
 		return fmt.Errorf("update: current executable path is unavailable")
 	}
+	releasePaths := releaseUnitPathsFor(filepath.Dir(exe), "linux")
+	if prepared == nil {
+		return fmt.Errorf("update: prepared transaction is unavailable")
+	}
+	_, releaseClaim, err := repair.ClaimPendingFileUpdate(
+		prepared.ToVersion,
+		prepared.CreatedAt,
+		exe,
+		releasePaths,
+		2*time.Minute,
+	)
+	if err != nil {
+		return fmt.Errorf("update: claim prepared transaction: %w", err)
+	}
+	defer releaseClaim()
+	return applyLinuxReleaseUnit(exe, bin, guard, cli)
+}
+
+var currentExecutablePathForLinux = currentExecutablePath
+
+var applyLinuxReleaseUnit = func(exe string, bin, guard, cli []byte) error {
 	if err := writeAtomic(filepath.Join(filepath.Dir(exe), "reasonix"), cli, 0o700); err != nil {
 		return fmt.Errorf("update CLI sidecar: %w", err)
 	}
@@ -827,8 +849,11 @@ func applyLinux(targz []byte) error {
 	return selfupdate.Apply(bytes.NewReader(bin), selfupdate.Options{})
 }
 
-func applyWindowsFile(path, toVersion string) error {
-	return startWindowsUpdateHandoff(path, currentInstallDir(), currentLauncherPath(), toVersion)
+func applyWindowsFile(path string, prepared *repair.UpdateTransaction) error {
+	if prepared == nil {
+		return fmt.Errorf("update: prepared transaction is unavailable")
+	}
+	return startWindowsUpdateHandoff(path, currentInstallDir(), currentLauncherPath(), prepared.ToVersion, prepared.CreatedAt)
 }
 
 func currentExecutablePath() string {
@@ -861,11 +886,28 @@ func updateSiblingArtifacts() []string {
 	if dir == "" {
 		return nil
 	}
-	names := updateSiblingNames(runtime.GOOS)
-	if len(names) == 0 {
+	paths := releaseUnitPathsFor(dir, runtime.GOOS)
+	if len(paths) <= 1 {
 		return nil
 	}
+	return paths[1:]
+}
+
+func releaseUnitPathsFor(dir, goos string) []string {
+	if dir == "" {
+		return nil
+	}
+	names := updateSiblingNames(goos)
 	paths := make([]string, 0, len(names))
+	switch goos {
+	case "linux":
+		paths = append(paths, filepath.Join(dir, "reasonix-desktop"))
+	case "windows":
+		paths = append(paths, filepath.Join(dir, "reasonix-desktop.exe"))
+	}
+	if len(names) == 0 {
+		return paths
+	}
 	for _, name := range names {
 		paths = append(paths, filepath.Join(dir, name))
 	}

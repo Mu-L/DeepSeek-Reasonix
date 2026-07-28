@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync/atomic"
@@ -21,6 +22,7 @@ import (
 	"time"
 
 	"reasonix/desktop/internal/update"
+	"reasonix/internal/repair"
 )
 
 func TestNormalizeVersion(t *testing.T) {
@@ -500,6 +502,85 @@ func TestExtractBinary(t *testing.T) {
 	}
 	if _, err := extractBinary(buf.Bytes(), "missing"); err == nil {
 		t.Error("missing entry should error")
+	}
+}
+
+func TestApplyLinuxHoldsReleaseUnitLockDuringReplace(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("REASONIX_HOME", t.TempDir())
+	exe := filepath.Join(dir, "reasonix-desktop")
+	releasePaths := releaseUnitPathsFor(dir, "linux")
+	for _, path := range releasePaths {
+		if err := os.WriteFile(path, []byte("old"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	prepared, err := repair.PrepareFileUpdate("v1", "v2", exe, releasePaths[1:]...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalPath := currentExecutablePathForLinux
+	originalApply := applyLinuxReleaseUnit
+	currentExecutablePathForLinux = func() string { return exe }
+	entered := make(chan struct{})
+	releaseReplace := make(chan struct{})
+	applyLinuxReleaseUnit = func(string, []byte, []byte, []byte) error {
+		close(entered)
+		<-releaseReplace
+		return nil
+	}
+	t.Cleanup(func() {
+		currentExecutablePathForLinux = originalPath
+		applyLinuxReleaseUnit = originalApply
+	})
+
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	for _, name := range []string{"reasonix-desktop", "reasonix-guard", "reasonix"} {
+		body := []byte(name)
+		if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0o755, Size: int64(len(body)), Typeflag: tar.TypeReg}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write(body); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	applyDone := make(chan error, 1)
+	go func() { applyDone <- applyLinux(buf.Bytes(), prepared) }()
+	select {
+	case <-entered:
+	case err := <-applyDone:
+		t.Fatalf("applyLinux failed before replacement: %v", err)
+	}
+
+	lockDone := make(chan error, 1)
+	go func() {
+		unlock, err := repair.LockRepairMutations(releasePaths...)
+		if err == nil {
+			unlock()
+		}
+		lockDone <- err
+	}()
+	select {
+	case err := <-lockDone:
+		close(releaseReplace)
+		t.Fatalf("competing updater lock acquired during Linux replacement: %v", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	close(releaseReplace)
+	if err := <-applyDone; err != nil {
+		t.Fatalf("applyLinux: %v", err)
+	}
+	if err := <-lockDone; err != nil {
+		t.Fatalf("competing lock after replacement: %v", err)
 	}
 }
 

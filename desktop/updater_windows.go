@@ -32,15 +32,15 @@ func installerCommand(name, dir string) *exec.Cmd {
 	return cmd
 }
 
-func startWindowsUpdateHandoff(installerPath, installDir, relaunchPath, toVersion string) error {
+func startWindowsUpdateHandoff(installerPath, installDir, relaunchPath, toVersion, createdAt string) error {
 	// The helper is the only process that can observe an installer failure after
 	// the desktop exits and route recovery back through Guard. Starting NSIS
 	// directly here would make a failed/partial install indistinguishable from a
 	// successful handoff, so a missing or quarantined helper must fail safely.
-	return startWindowsUpdateHelper(installerPath, installDir, relaunchPath, toVersion)
+	return startWindowsUpdateHelper(installerPath, installDir, relaunchPath, toVersion, createdAt)
 }
 
-func startWindowsUpdateHelper(installerPath, installDir, relaunchPath, toVersion string) error {
+func startWindowsUpdateHelper(installerPath, installDir, relaunchPath, toVersion, createdAt string) error {
 	if installDir == "" {
 		return os.ErrNotExist
 	}
@@ -49,7 +49,7 @@ func startWindowsUpdateHelper(installerPath, installDir, relaunchPath, toVersion
 		return err
 	}
 	err = retryWindowsUpdateHelperStart(func() error {
-		cmd := exec.Command(helperPath, windowsUpdateHandoffArgs(os.Getpid(), installerPath, installDir, relaunchPath, toVersion)...)
+		cmd := exec.Command(helperPath, windowsUpdateHandoffArgs(os.Getpid(), installerPath, installDir, relaunchPath, toVersion, createdAt)...)
 		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 		return cmd.Start()
 	})

@@ -30,12 +30,13 @@ var (
 	openCommand = func(args ...string) *exec.Cmd {
 		return exec.Command("open", args...)
 	}
-	readMacUpdateHandoff  = repair.ReadPendingUpdate
-	claimMacUpdateHandoff = repair.ClaimPendingAppBundleUpdateHandoff
-	clearMacUpdateHandoff = repair.ClearClaimedAppBundleUpdateHandoff
-	verifyMacHandoffApp   = verifyMacApp
-	macHandoffRename      = os.Rename
-	macHandoffLogPath     = func() string {
+	readMacUpdateHandoff   = repair.ReadPendingUpdate
+	claimMacUpdateHandoff  = repair.ClaimPendingAppBundleUpdateHandoff
+	cancelMacUpdateHandoff = repair.CancelPendingAppBundleUpdateHandoff
+	clearMacUpdateHandoff  = repair.ClearClaimedAppBundleUpdateHandoff
+	verifyMacHandoffApp    = verifyMacApp
+	macHandoffRename       = os.Rename
+	macHandoffLogPath      = func() string {
 		cacheDir, err := updateCacheDir()
 		if err != nil {
 			return ""
@@ -172,12 +173,10 @@ func runMacUpdateHandoff(cfg macUpdateHandoffConfig) int {
 	// exit wait does not block unrelated project repairs.
 	if err := waitForPIDExit(pending.HandoffOwnerPID, 60*time.Second); err != nil {
 		logf("timed out waiting for PID %d to exit: %v", pending.HandoffOwnerPID, err)
-		if claimed, release, claimErr := claimMacUpdateHandoff(cfg.ToVersion, cfg.CreatedAt, macUpdateHandoffLockTimeout); claimErr == nil {
-			if clearErr := clearMacUpdateHandoff(claimed); clearErr != nil {
-				logf("failed to clear timed-out handoff: %v", clearErr)
-			}
-			_ = os.RemoveAll(claimed.HandoffStagingPath)
-			release()
+		if cancelled, cancelErr := cancelMacUpdateHandoff(cfg.ToVersion, cfg.CreatedAt, macUpdateHandoffLockTimeout); cancelErr == nil {
+			_ = os.RemoveAll(cancelled.HandoffStagingPath)
+		} else {
+			logf("failed to cancel timed-out handoff: %v", cancelErr)
 		}
 		return 1
 	}
@@ -187,6 +186,17 @@ func runMacUpdateHandoff(cfg macUpdateHandoffConfig) int {
 	claimed, release, err := claimMacUpdateHandoff(cfg.ToVersion, cfg.CreatedAt, macUpdateHandoffLockTimeout)
 	if err != nil {
 		logf("failed to claim pending update handoff: %v", err)
+		cancelled, cancelErr := cancelMacUpdateHandoff(cfg.ToVersion, cfg.CreatedAt, macUpdateHandoffLockTimeout)
+		if cancelErr != nil {
+			logf("failed to cancel rejected update handoff: %v", cancelErr)
+			return 1
+		}
+		_ = os.RemoveAll(cancelled.HandoffStagingPath)
+		if verifyErr := verifyMacHandoffApp(cancelled.TargetPath); verifyErr != nil {
+			logf("original app bundle no longer verifies: %v", verifyErr)
+			return 1
+		}
+		_ = openCommand(cancelled.TargetPath).Start()
 		return 1
 	}
 	defer release()
@@ -201,6 +211,20 @@ func runMacUpdateHandoff(cfg macUpdateHandoffConfig) int {
 	}
 	if err := verifyMacHandoffApp(newApp); err != nil {
 		logf("replacement app bundle no longer verifies: %v", err)
+		clearPending()
+		_ = os.RemoveAll(staging)
+		_ = openCommand(oldApp).Start()
+		return 1
+	}
+	if err := repair.VerifyAppBundleUpdateHandoffSource(claimed); err != nil {
+		logf("replacement app bundle source changed: %v", err)
+		clearPending()
+		_ = os.RemoveAll(staging)
+		_ = openCommand(oldApp).Start()
+		return 1
+	}
+	if err := repair.VerifyAppBundleUpdateHandoffOriginal(claimed); err != nil {
+		logf("installed app bundle changed before swap: %v", err)
 		clearPending()
 		_ = os.RemoveAll(staging)
 		_ = openCommand(oldApp).Start()
@@ -247,8 +271,36 @@ func runMacUpdateHandoff(cfg macUpdateHandoffConfig) int {
 		_ = openCommand(oldApp).Start()
 		return 1
 	}
+	if err := repair.VerifyAppBundleUpdateHandoffBackup(claimed); err != nil {
+		logf("rollback backup changed during swap: %v", err)
+		if rollbackErr := rollback(); rollbackErr != nil {
+			logf("failed to restore backup bundle: %v", rollbackErr)
+		}
+		return 1
+	}
 	if err := exec.Command("ditto", newApp, oldApp).Run(); err != nil {
 		logf("failed to copy replacement app bundle: %v", err)
+		if rollbackErr := rollback(); rollbackErr != nil {
+			logf("failed to restore backup bundle: %v", rollbackErr)
+		}
+		return 1
+	}
+	if err := repair.VerifyAppBundleUpdateHandoffSource(claimed); err != nil {
+		logf("replacement app bundle source changed during copy: %v", err)
+		if rollbackErr := rollback(); rollbackErr != nil {
+			logf("failed to restore backup bundle: %v", rollbackErr)
+		}
+		return 1
+	}
+	if err := repair.VerifyAppBundleUpdateHandoffTarget(claimed); err != nil {
+		logf("installed app bundle differs from verified source: %v", err)
+		if rollbackErr := rollback(); rollbackErr != nil {
+			logf("failed to restore backup bundle: %v", rollbackErr)
+		}
+		return 1
+	}
+	if err := verifyMacHandoffApp(oldApp); err != nil {
+		logf("installed app bundle no longer verifies: %v", err)
 		if rollbackErr := rollback(); rollbackErr != nil {
 			logf("failed to restore backup bundle: %v", rollbackErr)
 		}

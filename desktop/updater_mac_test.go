@@ -23,8 +23,23 @@ func installMacHandoffTestDeps(
 	claim func(string, string, time.Duration) (*repair.UpdateTransaction, func(), error),
 ) {
 	t.Helper()
+	if tx.HandoffAppTreeID == "" {
+		digest, err := repair.AppBundleTreeDigest(tx.HandoffAppPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tx.HandoffAppTreeID = digest
+	}
+	if tx.BackupTreeID == "" {
+		digest, err := repair.AppBundleTreeDigest(tx.TargetPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tx.BackupTreeID = digest
+	}
 	originalRead := readMacUpdateHandoff
 	originalClaim := claimMacUpdateHandoff
+	originalCancel := cancelMacUpdateHandoff
 	originalClear := clearMacUpdateHandoff
 	originalVerify := verifyMacHandoffApp
 	originalLogPath := macHandoffLogPath
@@ -39,6 +54,11 @@ func installMacHandoffTestDeps(
 		}
 	}
 	claimMacUpdateHandoff = claim
+	cancelMacUpdateHandoff = func(string, string, time.Duration) (*repair.UpdateTransaction, error) {
+		copy := *tx
+		_ = os.Remove(pendingPath)
+		return &copy, nil
+	}
 	clearMacUpdateHandoff = func(*repair.UpdateTransaction) error {
 		return os.Remove(pendingPath)
 	}
@@ -47,6 +67,7 @@ func installMacHandoffTestDeps(
 	t.Cleanup(func() {
 		readMacUpdateHandoff = originalRead
 		claimMacUpdateHandoff = originalClaim
+		cancelMacUpdateHandoff = originalCancel
 		clearMacUpdateHandoff = originalClear
 		verifyMacHandoffApp = originalVerify
 		macHandoffLogPath = originalLogPath
@@ -332,6 +353,199 @@ func TestMacUpdateHandoffReverifiesStagedBundleBeforeSwap(t *testing.T) {
 	}
 	if _, err := os.Stat(pending); !os.IsNotExist(err) {
 		t.Fatalf("pending transaction was not cleared: %v", err)
+	}
+}
+
+func TestMacUpdateHandoffRestartsOriginalAfterRejectedClaim(t *testing.T) {
+	root := t.TempDir()
+	oldApp := filepath.Join(root, "Reasonix.app")
+	newApp := filepath.Join(root, "staging", "Reasonix.app")
+	backupApp := oldApp + ".reasonix-update-backup"
+	pending := filepath.Join(root, "pending.json")
+	for _, dir := range []string{oldApp, newApp} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(oldApp, "marker"), []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(newApp, "marker"), []byte("new"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pending, []byte("pending"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tx := &repair.UpdateTransaction{
+		ToVersion:          "v2",
+		CreatedAt:          "2026-07-28T00:00:00Z",
+		TargetKind:         "app-bundle",
+		TargetPath:         oldApp,
+		BackupPath:         backupApp,
+		HandoffAppPath:     newApp,
+		HandoffStagingPath: filepath.Dir(newApp),
+		HandoffOwnerPID:    99999999,
+	}
+	installMacHandoffTestDeps(
+		t,
+		tx,
+		pending,
+		filepath.Join(root, "update.log"),
+		func(string, string, time.Duration) (*repair.UpdateTransaction, func(), error) {
+			return nil, nil, fmt.Errorf("staged bundle changed")
+		},
+	)
+	opened := make(chan string, 1)
+	originalOpen := openCommand
+	openCommand = func(args ...string) *exec.Cmd {
+		if len(args) > 0 {
+			opened <- args[len(args)-1]
+		}
+		return exec.Command("/bin/sh", "-c", "exit 0")
+	}
+	t.Cleanup(func() { openCommand = originalOpen })
+
+	if code := runMacUpdateHandoff(macUpdateHandoffConfig{ToVersion: tx.ToVersion, CreatedAt: tx.CreatedAt}); code == 0 {
+		t.Fatal("rejected handoff returned success")
+	}
+	select {
+	case got := <-opened:
+		if got != oldApp {
+			t.Fatalf("reopened app = %q, want %q", got, oldApp)
+		}
+	default:
+		t.Fatal("original app was not restarted after safe cancellation")
+	}
+	if _, err := os.Stat(pending); !os.IsNotExist(err) {
+		t.Fatalf("pending transaction survived safe cancellation: %v", err)
+	}
+	if _, err := os.Stat(filepath.Dir(newApp)); !os.IsNotExist(err) {
+		t.Fatalf("staging survived safe cancellation: %v", err)
+	}
+}
+
+func TestMacUpdateHandoffRollsBackWhenInstalledBundleFailsVerification(t *testing.T) {
+	root := t.TempDir()
+	oldApp := filepath.Join(root, "Reasonix.app")
+	newApp := filepath.Join(root, "staging", "Reasonix.app")
+	backupApp := oldApp + ".reasonix-update-backup"
+	pending := filepath.Join(root, "pending.json")
+	for _, dir := range []string{oldApp, newApp} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(oldApp, "marker"), []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(newApp, "marker"), []byte("new"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pending, []byte("pending"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tx := &repair.UpdateTransaction{
+		ToVersion:          "v2",
+		CreatedAt:          "2026-07-28T00:00:00Z",
+		TargetKind:         "app-bundle",
+		TargetPath:         oldApp,
+		BackupPath:         backupApp,
+		HandoffAppPath:     newApp,
+		HandoffStagingPath: filepath.Dir(newApp),
+		HandoffOwnerPID:    99999999,
+	}
+	installMacHandoffTestDeps(t, tx, pending, filepath.Join(root, "update.log"), nil)
+	verifyCalls := 0
+	verifyMacHandoffApp = func(path string) error {
+		verifyCalls++
+		if path == oldApp {
+			return fmt.Errorf("installed signature changed")
+		}
+		return nil
+	}
+	originalOpen := openCommand
+	openCommand = func(args ...string) *exec.Cmd {
+		return exec.Command("/bin/sh", "-c", "exit 0")
+	}
+	t.Cleanup(func() { openCommand = originalOpen })
+
+	code := runMacUpdateHandoff(macUpdateHandoffConfig{ToVersion: tx.ToVersion, CreatedAt: tx.CreatedAt})
+	if code == 0 {
+		t.Fatal("handoff accepted an installed bundle that failed verification")
+	}
+	if verifyCalls != 2 {
+		t.Fatalf("bundle verification calls = %d, want source and installed target", verifyCalls)
+	}
+	if got, err := os.ReadFile(filepath.Join(oldApp, "marker")); err != nil || string(got) != "old" {
+		t.Fatalf("rollback after installed verification failure = %q, %v", got, err)
+	}
+	if _, err := os.Stat(pending); !os.IsNotExist(err) {
+		t.Fatalf("pending transaction survived completed rollback: %v", err)
+	}
+}
+
+func TestMacUpdateHandoffRestoresOriginalWhenItChangesDuringRename(t *testing.T) {
+	root := t.TempDir()
+	oldApp := filepath.Join(root, "Reasonix.app")
+	newApp := filepath.Join(root, "staging", "Reasonix.app")
+	backupApp := oldApp + ".reasonix-update-backup"
+	pending := filepath.Join(root, "pending.json")
+	for _, dir := range []string{oldApp, newApp} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldMarker := filepath.Join(oldApp, "marker")
+	if err := os.WriteFile(oldMarker, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(newApp, "marker"), []byte("new"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pending, []byte("pending"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tx := &repair.UpdateTransaction{
+		ToVersion:          "v2",
+		CreatedAt:          "2026-07-28T00:00:00Z",
+		TargetKind:         "app-bundle",
+		TargetPath:         oldApp,
+		BackupPath:         backupApp,
+		HandoffAppPath:     newApp,
+		HandoffStagingPath: filepath.Dir(newApp),
+		HandoffOwnerPID:    99999999,
+	}
+	installMacHandoffTestDeps(t, tx, pending, filepath.Join(root, "update.log"), nil)
+	originalRename := macHandoffRename
+	changed := false
+	macHandoffRename = func(from, to string) error {
+		if !changed && from == oldApp && to == backupApp {
+			changed = true
+			if err := os.WriteFile(oldMarker, []byte("concurrent"), 0o600); err != nil {
+				return err
+			}
+		}
+		return originalRename(from, to)
+	}
+	t.Cleanup(func() { macHandoffRename = originalRename })
+	originalOpen := openCommand
+	openCommand = func(args ...string) *exec.Cmd {
+		return exec.Command("/bin/sh", "-c", "exit 0")
+	}
+	t.Cleanup(func() { openCommand = originalOpen })
+
+	code := runMacUpdateHandoff(macUpdateHandoffConfig{ToVersion: tx.ToVersion, CreatedAt: tx.CreatedAt})
+	if code == 0 {
+		t.Fatal("handoff accepted an original bundle that changed during rename")
+	}
+	if got, err := os.ReadFile(oldMarker); err != nil || string(got) != "concurrent" {
+		t.Fatalf("concurrent original was not restored: %q, %v", got, err)
+	}
+	if _, err := os.Stat(backupApp); !os.IsNotExist(err) {
+		t.Fatalf("backup survived compensated handoff: %v", err)
+	}
+	if _, err := os.Stat(pending); !os.IsNotExist(err) {
+		t.Fatalf("pending transaction survived compensated handoff: %v", err)
 	}
 }
 

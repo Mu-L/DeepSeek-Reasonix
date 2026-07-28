@@ -27,11 +27,13 @@ func TestWindowsUpdateHandoffArgsCarryParentInstallAndRelaunch(t *testing.T) {
 		`D:\Tools\Reasonix App`,
 		`D:\Tools\Reasonix App\reasonix-desktop.exe`,
 		"v1.6.0",
+		"2026-07-29T00:00:00Z",
 	)
 	want := []string{
 		"--parent-pid", "4242",
 		"--installer", `C:\Users\Jane Doe\AppData\Local\Reasonix\updates\Reasonix-windows-amd64-installer.exe`,
 		"--to-version", "v1.6.0",
+		"--created-at", "2026-07-29T00:00:00Z",
 		"--install-dir", `D:\Tools\Reasonix App`,
 		"--relaunch", `D:\Tools\Reasonix App\reasonix-desktop.exe`,
 	}
