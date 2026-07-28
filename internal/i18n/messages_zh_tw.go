@@ -233,7 +233,7 @@ var ChineseTraditional = Messages{
 	CmdModel:            "切換模型",
 	CmdStatus:           "顯示工作階段狀態",
 	CmdWorkMode:         "切換工作模式",
-	CmdMemory:           "檢視記憶檔案",
+	CmdMemory:           "檢視指令、記憶與復原狀態",
 	CmdMigrate:          "重試舊資料遷移",
 	CmdRemember:         "儲存一條記憶",
 	CmdForget:           "刪除一條已存記憶",

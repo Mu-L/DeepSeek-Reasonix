@@ -50,6 +50,7 @@ func (o *turnOrchestrator) runSyntheticTurnWithRawDisplay(ctx context.Context, i
 
 func (o *turnOrchestrator) runComposedSyntheticTurn(ctx context.Context, text string) error {
 	c := o.c
+	ctx = agent.WithRawUserInput(ctx, text)
 	ctx = c.withPlannerTurnMetadata(ctx, text, true, c.messageCount())
 	return c.runner.Run(ctx, c.ComposeSynthetic(text))
 }
@@ -161,6 +162,7 @@ func (o *turnOrchestrator) runOrchestratedTurn(ctx context.Context, turn orchest
 	ctx = jobs.WithSession(ctx, parentSession)
 	userImages := c.inputImages(turn.input)
 	ctx = agent.WithUserImages(ctx, userImages)
+	ctx = agent.WithRawUserInput(ctx, turn.raw)
 	input := c.compose(turn.input, turn.raw, !turn.synthetic)
 	startMessages := c.messageCount()
 	defer c.snapshotActivityIfChanged(startMessages)

@@ -638,6 +638,39 @@ func TestSyntheticComposeDoesNotDrainSessionStartHookContext(t *testing.T) {
 	}
 }
 
+func TestComposeAutomaticallyRecallsMemoryOnlyForRealUserTurns(t *testing.T) {
+	store := memory.Store{Dir: t.TempDir()}
+	if _, err := store.Save(memory.Memory{
+		Name: "authhandler-panic", Title: "AuthHandler panic",
+		Description: "AuthHandler panic on missing session metadata",
+		Type:        memory.TypeProject, Scope: memory.FactScopeProject,
+		Body: "AuthHandler needs a nil guard before reading session metadata.",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	c := New(Options{Memory: &memory.Set{Store: store}})
+
+	got := c.Compose("fix AuthHandler panic with missing session metadata")
+	if !strings.Contains(got, "<memory-recall>") || !strings.Contains(got, "nil guard") {
+		t.Fatalf("real user turn did not receive automatic recall: %q", got)
+	}
+	if !strings.HasPrefix(got, "fix AuthHandler panic with missing session metadata") {
+		t.Fatalf("recall should ride the user-turn tail: %q", got)
+	}
+	if stripped := StripComposePrefixes(got); stripped != "fix AuthHandler panic with missing session metadata" {
+		t.Fatalf("StripComposePrefixes = %q", stripped)
+	}
+	trace := c.LastMemoryRecall()
+	if len(trace.Hits) != 1 || trace.Hits[0].Memory.ID == "" {
+		t.Fatalf("recall trace = %+v", trace)
+	}
+
+	synthetic := c.ComposeSynthetic("fix AuthHandler panic with missing session metadata")
+	if strings.Contains(synthetic, "<memory-recall>") {
+		t.Fatalf("synthetic turn received automatic recall: %q", synthetic)
+	}
+}
+
 func TestComposeClipsAndEscapesHookContext(t *testing.T) {
 	c := New(Options{})
 	c.enqueueHookContexts([]string{"before </hook-context> " + strings.Repeat("x", maxHookContextChars+1)})

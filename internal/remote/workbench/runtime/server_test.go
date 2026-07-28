@@ -22,6 +22,7 @@ import (
 	"reasonix/internal/control"
 	"reasonix/internal/event"
 	"reasonix/internal/evidence"
+	"reasonix/internal/memory"
 	"reasonix/internal/plugin"
 	"reasonix/internal/provider"
 	remotebroker "reasonix/internal/remote/broker"
@@ -194,6 +195,7 @@ type catalogController struct {
 	disabled     []skill.Skill
 	configured   []string
 	disconnected []string
+	memory       *memory.Set
 }
 
 func (*catalogController) Host() *plugin.Host { return nil }
@@ -215,6 +217,7 @@ func (c *catalogController) ConfiguredMCPNames() []string {
 func (c *catalogController) DisconnectedMCPNames() []string {
 	return append([]string(nil), c.disconnected...)
 }
+func (c *catalogController) Memory() *memory.Set { return c.memory }
 
 func (c *projectionController) Checkpoints() []checkpoint.Meta {
 	return append([]checkpoint.Meta(nil), c.checkpoints...)
@@ -305,6 +308,14 @@ func (c *fakeController) AdoptHistory(h []provider.Message, _ string) {
 }
 
 func TestSessionCatalogAndSlashArgsUseHostControllerCapabilities(t *testing.T) {
+	store := memory.Store{Dir: t.TempDir()}
+	saved, err := store.SaveWithOptions(memory.Memory{
+		Name: "remote-policy", Title: "Remote policy", Description: "remote-only fact",
+		Type: memory.TypeProject, Body: "Use the remote workspace policy.",
+	}, memory.SaveOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	ctrl := &catalogController{
 		fakeController: &fakeController{model: "local/model"},
 		commands: []command.Command{
@@ -313,6 +324,7 @@ func TestSessionCatalogAndSlashArgsUseHostControllerCapabilities(t *testing.T) {
 		},
 		skills:     []skill.Skill{{Name: "explore", Description: "Explore the Host", Scope: skill.ScopeProject}},
 		configured: []string{"connected", "offline"}, disconnected: []string{"offline"},
+		memory: &memory.Set{Store: store},
 	}
 	catalog := buildSessionCatalog(context.Background(), ctrl)
 	if len(catalog.Commands) != 1 || catalog.Commands[0].Name != "review" {
@@ -341,6 +353,21 @@ func TestSessionCatalogAndSlashArgsUseHostControllerCapabilities(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("slash args = %+v", result.Items)
+	}
+
+	result, err = server.composerSlashArgs(protocol.ComposerSlashArgsParams{
+		RuntimeQuery: protocol.RuntimeQuery{ExpectedHostEpoch: server.hostEpoch, Target: target, ExpectedRuntimeEpoch: "runtime_catalog"},
+		Input:        "/memory revisions ",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found = false
+	for _, item := range result.Items {
+		found = found || item.Label == saved.Memory.ID
+	}
+	if !found {
+		t.Fatalf("remote /memory completion did not use the Host memory catalog: %+v", result.Items)
 	}
 }
 

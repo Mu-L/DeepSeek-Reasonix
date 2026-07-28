@@ -244,7 +244,7 @@ var English = Messages{
 	CmdModel:            "switch model",
 	CmdStatus:           "show session status",
 	CmdWorkMode:         "switch work mode",
-	CmdMemory:           "show memory files",
+	CmdMemory:           "inspect instructions, memory, and recovery",
 	CmdMigrate:          "retry legacy data migration",
 	CmdGoal:             "set or clear the active goal",
 	CmdRemember:         "save a memory note",

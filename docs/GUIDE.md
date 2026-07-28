@@ -884,28 +884,59 @@ the desktop settings page.
 See [Subagent profiles](./SUBAGENT_PROFILES.md) for the complete CLI reference,
 Skill file format, model precedence, safety behavior, and troubleshooting.
 
-`/memory` lists both memory documents (`REASONIX.md` / `AGENTS.md`) and saved
-auto-memory facts. During agent turns, the read-only `history` and `memory`
-tools let the model retrieve prior session decisions, compacted-history
-archives, and saved facts on demand instead of injecting that dynamic state into
-the stable system prompt. `/forget <name>` archives a saved fact rather than
-deleting it permanently; the CLI/TUI and desktop memory panel can show those
-archived files for traceability, but they are not searched as active memory.
-Agent-initiated `remember` and `forget` calls always ask for fresh human approval
-and show a compact preview of the saved or archived memory before they run.
-Guardian review cannot answer for the user; non-interactive runs refuse these
-tools instead of auto-approving them.
-Retrieval keeps the top BM25 result while trimming weak common-word matches, and
-0-result responses suggest narrower, more distinctive follow-up searches.
-The Memory v5 execution compiler has been removed. Earlier releases (up to
-v1.17.x) could compile a user turn into a `<memory-compiler-execution>` contract
-and store local compiler state; current releases never do either, the
-`[agent].memory_compiler` config key is retired (a one-time migration removes it
-from existing configs), and transcripts recorded by those older releases still
-display normally — the original prompt is recovered from the legacy contract
-block for previews and history.
-For implementation details of session memory retrieval, see
-[`SESSION_MEMORY_RETRIEVAL.md`](SESSION_MEMORY_RETRIEVAL.md).
+Context Engine v2 separates two intentionally different layers:
+
+- **Standing instructions** come from hierarchical `REASONIX.md`, `AGENTS.md`,
+  and `CLAUDE.md` files. Put rules here when they must be present on every
+  relevant turn. User-global files load first, then workspace and deeper target
+  directories; within one directory, `.local.md` variants win.
+- **Background memory** stores one durable fact per Markdown file. Each fact has
+  an immutable ID, monotonic revision, timestamps, independent `type`
+  (`user`, `feedback`, `project`, `reference`) and `scope` (`project`,
+  `global`), plus freshness metadata. Facts may be stale, so they never outrank
+  the current request or standing instructions.
+
+Reasonix automatically recalls a small set of relevant facts before each real
+user turn. It searches the raw user message, suppresses generic requests such as
+"continue", prefers project facts over equivalent global fallbacks, down-ranks
+stale facts, and appends at most four facts / 2,400 characters to the user turn.
+This dynamic suffix does not rewrite the cache-stable system prompt or tool
+schemas. Use `/memory recall` to see the selected IDs, scores, reasons,
+freshness, budget, and suppression decision.
+
+New, bounded, non-sensitive project/reference facts can be created
+automatically with no setup or approval click. Global facts, user preferences,
+feedback, updates, duplicates, sensitive/oversized content, and every `forget`
+still require explicit confirmation. The storage layer makes the automatic
+grant create-only, so it cannot overwrite a fact that appears concurrently.
+A top-level headless controller may use the same one-shot low-risk create path;
+sub-agents and headless surfaces without the owning scoped controller fail closed.
+
+`forget` archives rather than permanently deletes. Every update snapshots the
+previous revision; restore and archive recovery always create a higher revision
+instead of overwriting history:
+
+```text
+/memory instructions
+/memory recall
+/memory revisions <id-or-name>
+/memory restore <id-or-name> <revision>
+/memory archived
+/memory recover <archive-path>
+```
+
+The desktop Context Center shows the same provenance, conflicts, revision
+history, recall trace, and recovery actions. Opening its Suggestions tab scans
+recent local user turns automatically; candidates are deduplicated against both
+memory scopes and instruction bodies, but nothing is saved until the user
+accepts it. Remote workspaces never fall back to local desktop memory or
+sessions.
+
+Legacy facts are upgraded in place with deterministic IDs and revision 1;
+missing scope is inferred from the containing directory. Migration is
+idempotent, old clients retain safe routing, and legacy Memory v5 transcripts
+remain readable. For the complete behavior and privacy/cache contract, see
+[`Context Engine v2`](SESSION_MEMORY_RETRIEVAL.md).
 
 ```markdown
 ---

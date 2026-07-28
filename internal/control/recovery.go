@@ -111,7 +111,7 @@ func (c *Controller) initRecoveryGate(reviewer recovery.Reviewer, headless bool)
 			msgs := c.executor.Session().Snapshot()
 			for i := len(msgs) - 1; i >= 0; i-- {
 				if string(msgs[i].Role) == "user" && strings.TrimSpace(msgs[i].Content) != "" {
-					text := strings.TrimSpace(msgs[i].Content)
+					text := agent.UserMessageText(msgs[i])
 					if len(text) > 800 {
 						return text[:800] + "…"
 					}

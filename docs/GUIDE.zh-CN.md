@@ -711,19 +711,45 @@ custom path 或包含更多手写结构的 Skill，避免丢失 frontmatter、re
 完整 CLI 参数、Skill 文件格式、模型优先级、安全行为和排障说明见
 [子智能体 Profile](./SUBAGENT_PROFILES.zh-CN.md)。
 
-`/memory` 会同时列出记忆文档（`REASONIX.md` / `AGENTS.md`）和已保存的 auto-memory 条目。
-在 agent 回合中，只读的 `history` 和 `memory` 工具可以按需检索历史 session 决策、
-compaction archive 和已保存事实；这些动态内容不会被塞进稳定的 system prompt 前缀。
-`/forget <name>` 会把已保存事实归档而不是永久删除；CLI/TUI 和桌面记忆面板能显示归档文件用于追溯，
-但它们不会作为 active memory 被检索。检索会保留 BM25 最强命中，同时裁掉弱的泛词命中；
-agent 发起的 `remember` 和 `forget` 每次都会要求新的人工确认，并在执行前展示将保存或归档的记忆摘要；
-Guardian 审查不能代替用户批准，非交互运行会拒绝这类工具而不是自动批准。
-0 结果会提示 agent 改用更少、更有区分度的词继续查。
-Memory v5 执行编译器已经移除。早期版本（至 v1.17.x）可能把用户轮次编译成
-`<memory-compiler-execution>` contract 并写入本地编译器状态；当前版本不再有这两种行为，
-`[agent].memory_compiler` 配置键已退役（一次性迁移会从既有配置中清除），那些旧版本录制的
-会话转写仍能正常显示——预览和历史会从 legacy contract 块中恢复原始提示词。
-会话记忆检索的技术实现细节见 [`SESSION_MEMORY_RETRIEVAL.md`](SESSION_MEMORY_RETRIEVAL.md)。
+Context Engine v2 把上下文分成两个用途不同的层：
+
+- **常驻指令**来自分层加载的 `REASONIX.md`、`AGENTS.md` 和 `CLAUDE.md`。必须在每个
+  相关回合都存在的规则应放在这里。用户全局文件先加载，再加载 workspace 和更深目标目录，
+  同一目录内 `.local.md` 变体优先。
+- **背景记忆**每个 Markdown 文件只保存一条持久事实。每条事实都有不变 ID、单调 revision、
+  时间戳、相互独立的 `type`（`user`、`feedback`、`project`、`reference`）与
+  `scope`（`project`、`global`），以及 freshness。事实可能过时，因此永远不能覆盖
+  当前请求和常驻指令。
+
+每个真实用户回合前，Reasonix 会自动召回一小组相关事实。它用原始用户消息搜索，抑制“继续”
+这类泛化请求，在等价事实中优先项目级版本，对 stale 内容降权，并最多把四条事实 / 2,400
+字符追加到本轮 user turn。这段动态后缀不会改写 cache-stable system prompt 或工具 schema。
+运行 `/memory recall` 可查看选中的 ID、score、原因、freshness、预算和 suppressed 决定。
+
+新的、有界、非敏感 project/reference 事实可以零配置自动创建，不弹审批。全局事实、用户偏好、
+feedback、更新、重复项、敏感/超长内容，以及所有 `forget` 仍需显式确认。存储层会把自动授权
+强制为 create-only，因此并发出现的新事实也不会被覆盖。顶层 headless controller 可使用同一条
+一次性低风险创建路径；子智能体和不拥有该作用域 controller 的 headless surface 会 fail closed。
+
+`forget` 只归档，不永久删除。每次更新都会快照上一 revision；恢复旧版本或 archive 时总会创建
+更高的新 revision，不会覆盖历史：
+
+```text
+/memory instructions
+/memory recall
+/memory revisions <id-or-name>
+/memory restore <id-or-name> <revision>
+/memory archived
+/memory recover <archive-path>
+```
+
+桌面 Context Center 展示相同的 provenance、冲突、revision history、recall trace 和恢复操作。
+打开 Suggestions tab 会自动扫描近期本地用户回合；候选会与两个 scope 的记忆和指令正文去重，
+但只有用户接受后才会保存。远程 workspace 绝不回退读取桌面机器的本地 memory 或 session。
+
+旧事实会原地获得确定性 ID 和 revision 1；缺失 scope 时根据所在目录推导。Migration 幂等，
+旧客户端仍能安全路由，旧 Memory v5 transcript 也继续可读。完整行为、隐私与 cache 契约见
+[`Context Engine v2`](SESSION_MEMORY_RETRIEVAL.zh-CN.md)。
 
 ```markdown
 ---

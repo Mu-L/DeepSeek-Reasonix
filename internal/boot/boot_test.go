@@ -527,7 +527,8 @@ model = "x"
 		t.Fatalf("LoadSession: %v", err)
 	}
 	msgs := sess.Snapshot()
-	if len(msgs) != 5 || !strings.HasSuffix(msgs[1].Content, "first skill task") || msgs[2].Content != "first skill answer" || msgs[3].Content != "second skill task" || !msgs[4].LocalOnly {
+	modelMessages := provider.ModelMessages(msgs)
+	if len(msgs) != 5 || len(modelMessages) != 4 || !strings.HasSuffix(modelMessages[1].Content, "first skill task") || modelMessages[2].Content != "first skill answer" || modelMessages[3].Content != "second skill task" || !msgs[4].LocalOnly {
 		t.Fatalf("failed skill transcript = %+v, want tasks plus provider-excluded failure recovery", msgs)
 	}
 }

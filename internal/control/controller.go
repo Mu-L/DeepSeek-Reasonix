@@ -620,7 +620,7 @@ func (c *Controller) markEditedForNewUser(startMessages int, original string) {
 		if msgs[i].Role != provider.RoleUser {
 			continue
 		}
-		if msgs[i].Content == original {
+		if agent.UserMessageText(msgs[i]) == original {
 			return
 		}
 		msgs[i].Edited = true
@@ -779,6 +779,7 @@ func (c *Controller) spawnGuardedTurn(ctx context.Context, cancel context.Cancel
 // beginRotation refuses while running or finishing, and the drain flips
 // finishing directly into running.
 func (c *Controller) finishGuardedTurn(err error) {
+	c.memory.clearAutoRemember()
 	c.mu.Lock()
 	cancelRequested := c.canceling
 	c.running = false
@@ -1206,9 +1207,9 @@ func (c *Controller) submitCommandOrTurn(trimmed, input, display string, scopedR
 			runRefTurn(input, display)
 			return
 		}
-		// Read-only management verbs (/model /memory /skills /hooks /mcp) emit a
-		// listing Notice, so Submit-based frontends (desktop, HTTP) get them with
-		// no extra wiring. (The chat TUI handles these itself with richer output.)
+		// Management verbs (/model /memory /skills /hooks /mcp) emit a Notice, so
+		// Submit-based frontends (desktop, HTTP) get them with no extra wiring.
+		// The chat TUI handles these itself with richer output.
 		fields := strings.Fields(trimmed)
 		switch fields[0] {
 		case "/tree":
@@ -1628,6 +1629,7 @@ func (c *Controller) Run(ctx context.Context, input string) (err error) {
 	ctx = jobs.WithSession(ctx, parentSession)
 	ctx = agent.WithUserImages(ctx, c.inputImages(input))
 	rawInput := input
+	ctx = agent.WithRawUserInput(ctx, rawInput)
 	input = c.Compose(input)
 	startMessages := c.messageCount()
 	defer c.snapshotActivityIfChanged(startMessages)
@@ -1950,6 +1952,26 @@ func (c *Controller) newInteractiveGate() *permission.Gate {
 	return gate
 }
 
+func (c *Controller) allowLowRiskRemember(args json.RawMessage) bool {
+	mem := c.Memory()
+	if mem != nil {
+		if assessment := memory.AssessRememberWrite(mem.Store, args); assessment.AutoAllow {
+			c.memory.authorizeAutoRemember(args)
+			return true
+		}
+	}
+	c.memory.revokeAutoRemember(args)
+	return false
+}
+
+func (c *Controller) newHeadlessGate(mode string) *freshHumanHeadlessGate {
+	gate := BuildHeadlessApprovalGate(c.policy, mode)
+	gate.allowLowRiskFreshAction = func(toolName string, args json.RawMessage) bool {
+		return toolName == memoryRememberTool && c.allowLowRiskRemember(args)
+	}
+	return gate
+}
+
 type denyPermissionApprover struct{}
 
 func (denyPermissionApprover) Approve(context.Context, string, string, json.RawMessage) (bool, bool, error) {
@@ -1990,22 +2012,17 @@ func rulesWithoutFreshHumanApproval(rules []permission.Rule) []permission.Rule {
 //     approver); deny rules and fresh decisions still fail closed.
 //   - dontAsk: deny anything that would ask, and deny the writer fallback too.
 //
-// deny rules and fresh-human tools (memory, plan, sandbox, config) stay enforced
-// by the gate for every mode. ask/manual/acceptEdits are not routed here — the
-// caller leaves them at ToolApprovalAsk, keeping boot's default headless gate,
-// which resolves ordinary ask decisions to allow for `reasonix run` autonomy.
+// Deny rules and fresh-human tools (memory, plan, sandbox, config) stay enforced
+// by the gate for every mode. The only exception is a controller-assessed,
+// create-only project/reference memory; every other memory write remains denied.
 func (c *Controller) ApplyHeadlessApprovalMode(mode string) {
 	mode = normalizeToolApprovalMode(mode)
 	c.approval.setMode(mode)
 	if c.subagentGate != nil {
 		c.subagentGate.Update(mode)
 	}
-	if c.executor == nil {
-		return
-	}
-	switch mode {
-	case ToolApprovalYolo, ToolApprovalAuto, ToolApprovalDontAsk:
-		c.executor.SetGate(BuildHeadlessApprovalGate(c.policy, mode))
+	if c.executor != nil {
+		c.executor.SetGate(c.newHeadlessGate(mode))
 	}
 }
 
@@ -5317,6 +5334,28 @@ func (c *Controller) QueueMemory(note string) {
 	c.memory.queue(note)
 }
 
+// ClaimAutoMemoryWrite consumes the one-shot create-only authorization issued
+// by gateApprover for a low-risk project fact.
+func (c *Controller) ClaimAutoMemoryWrite(args json.RawMessage) bool {
+	return c.memory.claimAutoRemember(args)
+}
+
+func (c *Controller) MemoryRevisions(ref string) []memory.Memory {
+	return c.memory.revisions(ref)
+}
+
+// RestoreMemory restores an older active-memory revision as a new audited
+// revision and applies it to the next user turn.
+func (c *Controller) RestoreMemory(ref string, revision int) (memory.Memory, error) {
+	return c.memory.restore(ref, revision)
+}
+
+// RestoreArchivedMemory recovers an archived fact as a new audited revision and
+// applies it to the next user turn.
+func (c *Controller) RestoreArchivedMemory(archivePath string) (memory.Memory, error) {
+	return c.memory.restoreArchived(archivePath)
+}
+
 // Memory returns the loaded memory snapshot (nil when memory is disabled), for
 // frontends that surface a memory panel or the /memory command. The returned
 // *Set is immutable — mutations go through QuickAdd / SaveDoc.
@@ -5336,6 +5375,9 @@ func (g gateApprover) Approve(ctx context.Context, tool, subject string, args js
 }
 
 func (g gateApprover) ApproveWithReason(ctx context.Context, tool, subject string, args json.RawMessage) (bool, bool, string, error) {
+	if tool == memoryRememberTool && g.c.allowLowRiskRemember(args) {
+		return true, false, "", nil
+	}
 	subject = approvalDisplaySubject(tool, subject, args)
 	requireHuman := strings.EqualFold(tool, "bash") && permission.BashSubjectRequiresExplicitApproval(subject)
 	// Check pre-approval first, before any prompt or Guardian review. Dynamic

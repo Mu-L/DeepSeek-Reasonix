@@ -645,9 +645,7 @@ func runAgent(args []string, version string) int {
 		return 1
 	}
 	defer ctrl.Close()
-	if permissions.approval != control.ToolApprovalAsk {
-		ctrl.ApplyHeadlessApprovalMode(permissions.approval)
-	}
+	ctrl.ApplyHeadlessApprovalMode(permissions.approval)
 
 	// --resume: load a specific session file (non-interactive, meant for
 	// MCP/API callers that manage their own per-project session). Takes

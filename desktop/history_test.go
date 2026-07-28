@@ -77,6 +77,26 @@ func TestHistoryMessagesIncludeAssistantReasoning(t *testing.T) {
 	}
 }
 
+func TestHistoryMessagesPreferPersistedRawUserContent(t *testing.T) {
+	const raw = "fix the bug"
+	const rendered = "<capability-route version=\"1\">\nuse review\n</capability-route>\n\nfix the bug"
+	msgs := []provider.Message{{Role: provider.RoleUser, Content: rendered, RawContent: raw}}
+
+	got := historyMessages(msgs, func(string) string {
+		t.Fatal("raw_content should make provider wrapper parsing unnecessary")
+		return ""
+	})
+	if len(got) != 1 || got[0].Content != raw {
+		t.Fatalf("history user content = %+v, want raw %q", got, raw)
+	}
+	if got[0].SubmitText != raw {
+		t.Fatalf("history submit text = %q, want raw %q", got[0].SubmitText, raw)
+	}
+	if strings.Contains(got[0].Content, "capability-route") {
+		t.Fatalf("provider-only wrapper leaked into history: %+v", got[0])
+	}
+}
+
 func TestHistoryMessagesDoNotReplayMemoryCompilerContract(t *testing.T) {
 	raw := historyMemoryCompilerContract(t, "ship the refactor")
 	msgs := []provider.Message{

@@ -47,7 +47,8 @@ type runLoopState struct {
 // all Run-level defers (workspace lease, evidence commit, delivery checkpoint,
 // steer queue, active-turn timestamp).
 func (a *Agent) beginRunTurn(ctx context.Context, input string) (rawInput string, state *runLoopState) {
-	rawInput = input
+	rawInput = RawUserInput(ctx, input)
+	providerInput := input
 	scope, scoped := DeliveryExecutionScopeFromContext(ctx)
 	preserveEvidence := a.preserveEvidenceOnce
 	if a.evidence != nil {
@@ -119,7 +120,7 @@ func (a *Agent) beginRunTurn(ctx context.Context, input string) (rawInput string
 	// A cancelled/error turn leaves a provider-excluded recovery record at the
 	// transcript tail. Fold its bounded facts into this new user turn exactly
 	// once; the user's raw text remains the classifier source above.
-	rawInput = withInterruptedRecovery(rawInput, a.pendingInterruptedRecovery())
+	providerInput = withInterruptedRecovery(providerInput, a.pendingInterruptedRecovery())
 	a.repeatSuccessCounts = nil
 	if !scoped || a.repeatFailureScope != scope.ID {
 		a.repeatFailureCounts = nil
@@ -142,10 +143,17 @@ func (a *Agent) beginRunTurn(ctx context.Context, input string) (rawInput string
 	a.loopGuardArmed = false
 	a.loopGuardReceiptMark = 0
 	a.sink.Emit(event.Event{Kind: event.TurnStarted})
-	input = a.withTurnPreferences(rawInput)
+	input = a.withTurnPreferences(providerInput)
 	userCreatedAt := time.Now().UnixMilli()
 	a.activeTurnCreatedAt.Store(userCreatedAt)
-	a.session.Add(provider.Message{Role: provider.RoleUser, Content: input, Images: userImages(ctx), CreatedAt: userCreatedAt})
+	rawContent := ""
+	if input != rawInput {
+		rawContent = rawInput
+	}
+	a.session.Add(provider.Message{
+		Role: provider.RoleUser, Content: input, RawContent: rawContent,
+		Images: userImages(ctx), CreatedAt: userCreatedAt,
+	})
 
 	state = &runLoopState{
 		finalReadinessBlocks: 0,

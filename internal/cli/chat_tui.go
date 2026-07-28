@@ -4060,7 +4060,7 @@ func (m *chatTUI) runSlashCommand(input string) tea.Cmd {
 		m.showHelp()
 	case "/memory":
 		m.echoLocalCommand(input)
-		m.showMemory()
+		m.showMemory(input)
 	case "/migrate", "/migration":
 		m.echoLocalCommand(input)
 		migration.RunLegacyRescueCommand(strings.TrimSpace(strings.TrimPrefix(input, typedCmd)), event.FuncSink(func(e event.Event) {

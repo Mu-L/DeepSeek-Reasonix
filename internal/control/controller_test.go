@@ -26,6 +26,7 @@ import (
 	"reasonix/internal/hook"
 	"reasonix/internal/i18n"
 	"reasonix/internal/jobs"
+	"reasonix/internal/memory"
 	"reasonix/internal/permission"
 	"reasonix/internal/plugin"
 	"reasonix/internal/pluginpkg"
@@ -3561,6 +3562,53 @@ func TestGuardianCannotAutoAllowFreshHumanApprovalTools(t *testing.T) {
 		}
 	case <-time.After(30 * time.Second):
 		t.Fatal("memory approval stayed blocked after manual Approve")
+	}
+}
+
+func TestLowRiskProjectMemoryCreateSkipsApprovalPrompt(t *testing.T) {
+	store := memory.Store{Dir: t.TempDir()}
+	approvals := 0
+	c := New(Options{
+		Memory: &memory.Set{Store: store},
+		Sink: event.FuncSink(func(e event.Event) {
+			if e.Kind == event.ApprovalRequest {
+				approvals++
+			}
+		}),
+	})
+	args := json.RawMessage(`{"name":"release-target","description":"Project release target","type":"project","body":"Release from main-v2."}`)
+	allow, remember, reason, err := gateApprover{c}.ApproveWithReason(context.Background(), memoryRememberTool, "", args)
+	if err != nil || !allow || remember || reason != "" || approvals != 0 {
+		t.Fatalf("safe project create = (%v,%v,%q,%v), approvals=%d", allow, remember, reason, err, approvals)
+	}
+
+	out, err := memory.NewRememberTool(store).Execute(memory.WithQueue(context.Background(), c), args)
+	if err != nil || !strings.Contains(out, "Saved memory") {
+		t.Fatalf("auto-approved remember execution = %q, %v", out, err)
+	}
+	if got := store.List(); len(got) != 1 || got[0].Name != "release-target" {
+		t.Fatalf("saved memories = %+v", got)
+	}
+}
+
+func TestExistingMemoryRevokesAbandonedAutomaticCreateClaim(t *testing.T) {
+	store := memory.Store{Dir: t.TempDir()}
+	c := New(Options{Memory: &memory.Set{Store: store}})
+	args := json.RawMessage(`{"name":"release-target","description":"Project release target","type":"project","body":"Release from main-v2."}`)
+
+	if assessment := memory.AssessRememberWrite(store, args); !assessment.AutoAllow {
+		t.Fatalf("initial assessment = %+v", assessment)
+	}
+	c.memory.authorizeAutoRemember(args) // approval was issued, then the turn was cancelled
+	if _, err := store.Save(memory.Memory{Name: "release-target", Description: "concurrent", Body: "existing"}); err != nil {
+		t.Fatal(err)
+	}
+	if assessment := memory.AssessRememberWrite(store, args); assessment.AutoAllow {
+		t.Fatalf("existing assessment = %+v", assessment)
+	}
+	c.memory.revokeAutoRemember(args)
+	if c.ClaimAutoMemoryWrite(args) {
+		t.Fatal("abandoned automatic create claim survived an existing-memory reassessment")
 	}
 }
 

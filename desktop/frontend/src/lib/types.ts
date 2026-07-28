@@ -985,15 +985,65 @@ export interface SlashArgsResult {
 export interface MemoryDoc {
   path: string;
   scope: string; // "user" | "ancestor" | "project" | "local"
+  directory?: string;
   body: string;
+  imports: Array<{ path: string; sourcePath: string }>;
+  depth: number;
+  order: number;
+  precedence: number;
+}
+
+export interface InstructionDiagnostic {
+  code: string;
+  path: string;
+  sourcePath?: string;
+  line?: number;
+  message: string;
 }
 
 export interface MemoryFact {
+  id?: string;
+  revision?: number;
+  createdAt?: string;
+  updatedAt?: string;
   name: string;
   title?: string;
   description: string;
   type: string; // "user" | "feedback" | "project" | "reference"
+  scope: string; // "project" | "global"
   body: string;
+  freshness: string; // "fresh" | "current" | "stale"
+}
+
+export interface MemoryConflict {
+  key: string;
+  projectId: string;
+  projectName: string;
+  globalId: string;
+  globalName: string;
+  resolution: "project_over_global";
+}
+
+export interface MemoryRecallHit {
+  id: string;
+  revision: number;
+  name: string;
+  title?: string;
+  type: string;
+  scope: string;
+  score: number;
+  freshness: string;
+  reason: string;
+  snippet: string;
+}
+
+export interface MemoryRecallTrace {
+  query: string;
+  hits: MemoryRecallHit[];
+  omitted: number;
+  charBudget: number;
+  usedChars: number;
+  suppressed?: string;
 }
 
 export interface MemoryArchive extends MemoryFact {
@@ -1012,6 +1062,7 @@ export interface MemorySuggestion {
   title: string;
   description: string;
   type: string;
+  scope: string; // "project" | "global"
   body: string;
   reason: string;
   evidence: string[];
@@ -1040,6 +1091,9 @@ export interface MemoryView {
   facts: MemoryFact[];
   archives: MemoryArchive[];
   scopes: MemoryScope[];
+  instructionDiagnostics: InstructionDiagnostic[];
+  conflicts: MemoryConflict[];
+  lastRecall: MemoryRecallTrace;
   storeDir: string;
   storeGlobalDir?: string;
   available: boolean;
@@ -1212,7 +1266,7 @@ export interface CapabilityDiagnosticsReport {
     plugins: number;
     mcp_servers: number;
   };
-  instructions: { docs: Array<{ path: string; scope: string; order: number }> };
+  instructions: { docs: Array<{ path: string; scope: string; directory?: string; depth: number; order: number }> };
   skills: CapabilityAssetReport;
   commands: CapabilityAssetReport;
   hooks: {

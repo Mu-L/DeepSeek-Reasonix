@@ -245,7 +245,7 @@ var Chinese = Messages{
 	CmdModel:            "切换模型",
 	CmdStatus:           "显示会话状态",
 	CmdWorkMode:         "切换工作模式",
-	CmdMemory:           "查看记忆文件",
+	CmdMemory:           "查看指令、记忆与恢复状态",
 	CmdMigrate:          "重试旧数据迁移",
 	CmdGoal:             "设置或清除当前目标",
 	CmdRemember:         "保存一条记忆",

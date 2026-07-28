@@ -71,9 +71,10 @@ func newApprovalManager(policy permission.Policy, mode string, timeout time.Dura
 	}
 }
 
-// NewHeadlessPermissionGate builds the non-interactive gate used by `reasonix run`
-// and sub-agents. It preserves headless autonomy for ordinary Ask decisions, but
-// refuses tools whose contract requires a fresh human approval.
+// NewHeadlessPermissionGate builds the non-interactive gate used during boot and
+// by sub-agents. It preserves headless autonomy for ordinary Ask decisions, but
+// refuses fresh-human tools unless the owning Controller later installs a
+// scoped low-risk evaluator on the parent executor.
 func NewHeadlessPermissionGate(policy permission.Policy) *freshHumanHeadlessGate {
 	return &freshHumanHeadlessGate{gate: permission.NewGate(policy, nil)}
 }
@@ -156,12 +157,18 @@ func (g *SharedHeadlessGate) ExplicitlyDenies(toolName string, args json.RawMess
 }
 
 type freshHumanHeadlessGate struct {
-	gate              *permission.Gate
-	dynamicBashBypass bool
+	gate                    *permission.Gate
+	dynamicBashBypass       bool
+	allowLowRiskFreshAction func(toolName string, args json.RawMessage) bool
 }
 
 func (g *freshHumanHeadlessGate) Check(ctx context.Context, toolName string, args json.RawMessage, readOnly bool) (bool, string, error) {
 	if RequiresFreshHumanApprovalTool(toolName) {
+		if !g.gate.ExplicitlyDenies(toolName, args) &&
+			g.allowLowRiskFreshAction != nil &&
+			g.allowLowRiskFreshAction(toolName, args) {
+			return true, "", nil
+		}
 		return false, "this tool requires fresh human approval and cannot run in a non-interactive session. Use an interactive session or a user-initiated memory command.", nil
 	}
 	if strings.EqualFold(toolName, "bash") && permission.BashSubjectRequiresExplicitApproval(permission.Subject(args)) {
@@ -523,9 +530,11 @@ func normalizeToolApprovalMode(mode string) string {
 	}
 }
 
-// RequiresFreshHumanApprovalTool reports whether a tool must be answered by a
-// human decision, not by YOLO/auto approval, Guardian, or a non-interactive nil
-// approver. A small subset may still opt into explicit session grants.
+// RequiresFreshHumanApprovalTool reports whether a tool's unsafe variants must
+// be answered by a human decision, not by YOLO/auto approval, Guardian, or a
+// non-interactive nil approver. A controller that owns the scoped memory store
+// may still classify a bounded new project memory as create-only and allow that
+// narrow operation in interactive or headless mode.
 func RequiresFreshHumanApprovalTool(tool string) bool {
 	switch tool {
 	case planApprovalTool, memoryRememberTool, memoryForgetTool, SandboxEscapeApprovalTool, ManagedConfigWriteApprovalTool:

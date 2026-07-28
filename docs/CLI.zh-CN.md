@@ -244,7 +244,8 @@ reasonix --allowed-tools "Bash(go test ./...)" --allowed-tools read_file
 `ask`、`manual`、`acceptEdits` 保留 run 自主性，放行普通审批决策；`auto` 仍自动批准
 普通 fallback，但对命中显式 ask 规则的命令改为拒绝，而不是无人值守地执行；`dontAsk`
 拒绝；`bypassPermissions` 执行一切，仅始终需要人工新鲜批准的工具（记忆、plan、沙箱
-逃逸、受管配置写入）除外。
+逃逸、受管配置写入）除外。在所有模式下，拥有当前项目 store 的顶层 controller 仍可创建
+有界、非敏感、create-only 的 project/reference 记忆；其他记忆变更在无人确认时仍会被拒绝。
 
 ## 附加目录
 
@@ -314,9 +315,30 @@ SSH 下远端进程无法读取本机剪贴板，请使用终端粘贴快捷键�
 | `/verbose` | 切换详细 reasoning 显示。 |
 | `/sandbox` | 查看沙盒状态。 |
 | `/goal` | 启动、查看或清除长周期 Goal。 |
-| `/mcp`、`/skills`、`/hooks`、`/memory` | 查看和管理扩展或记忆。 |
+| `/mcp`、`/skills`、`/hooks` | 查看和管理扩展。 |
+| `/remember <note>` | 把常驻 note 追加到项目指令文档；`# <note>` 是快捷方式。 |
+| `/memory [subcommand]` | 查看指令、记忆 provenance、召回、revision 与恢复。 |
 | `/rewind` | 把对话和/或代码恢复到更早的 turn。 |
 | `/tree`、`/branch`、`/switch` | 查看或切换会话分支。 |
 
 切换模型、effort 或工作模式会重建运行时，同时保留当前对话、会话级权限覆盖、附加目录
 访问权限和 session ownership。
+
+### 记忆诊断与恢复
+
+直接运行 `/memory` 会显示全部 project/global active facts，不会隐藏跨 scope 的同名条目。
+每条事实包含稳定 ID、revision、scope、type、freshness 和 description。斜杠补全会提供
+可用子命令、active ID/name，以及当前 store 拥有的 archive path。
+
+| 命令 | 用途 |
+| --- | --- |
+| `/memory instructions` | 显示解析后的指令 precedence、目录、imports 和 diagnostics。 |
+| `/memory recall` | 解释最近一次自动召回的 query、hits、score、原因、freshness 和预算。 |
+| `/memory revisions <id-or-name>` | 显示 active revision 与不可变历史。 |
+| `/memory restore <id-or-name> <revision>` | 把旧内容恢复为一个单调递增的新 revision。 |
+| `/memory archived` | 列出 archive facts 及其受管路径。 |
+| `/memory recover <archive-path>` | 不覆盖 active data，把 archive 恢复为新 revision。 |
+
+这些命令始终作用于当前 session controller。Remote Workbench 使用远程 memory catalog，
+绝不回退读取桌面本机记忆。权限、自动召回、写入确认和迁移行为见
+[Context Engine v2](./SESSION_MEMORY_RETRIEVAL.zh-CN.md)。

@@ -419,6 +419,9 @@ func Build(ctx context.Context, opts Options) (*control.Controller, error) {
 	// controller's transient turn-injection and fold in on the next session.
 	mem := &memory.Set{CWD: root}
 	if !cfg.SafeMode() {
+		if _, err := memory.StoreFor(config.MemoryUserDir(), root).MigrateV2(); err != nil {
+			sink.Emit(event.Event{Kind: event.Notice, Level: event.LevelWarn, Text: "Memory metadata migration did not complete.", Detail: err.Error()})
+		}
 		mem = memory.Load(memory.Options{CWD: root, UserDir: config.MemoryUserDir()})
 	}
 	projectChecks := instruction.ExtractHostChecks(mem.Docs)

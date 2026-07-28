@@ -1308,6 +1308,7 @@ func loadSessionUnlocked(path string) (*Session, error) {
 	// slice headers: when NormalizeSession allocated a new backing array, the
 	// session is marked dirty so the next Save persists the fix.
 	normalized := NormalizeSession(s.Messages)
+	normalized = migrateLegacyProviderContent(normalized)
 	if len(normalized) != len(s.Messages) || (len(s.Messages) > 0 && &normalized[0] != &s.Messages[0]) {
 		s.normalizedDirty = true
 		// Keep the pre-repair transcript: checkSnapshotWrite must be able to
@@ -2007,10 +2008,10 @@ func SessionPreviewFromMessages(msgs []provider.Message) (string, int) {
 	first := ""
 	turns := 0
 	for _, m := range msgs {
-		if m.Role == provider.RoleUser && IsUserAuthoredTurn(m.Content) {
+		if m.Role == provider.RoleUser && IsUserAuthoredTurn(UserMessageText(m)) {
 			turns++
 			if first == "" {
-				first = truncatePreview(UserPreviewText(m.Content))
+				first = truncatePreview(UserMessageText(m))
 			}
 		}
 	}
@@ -2028,10 +2029,10 @@ func previewSession(path string) (string, int) {
 	first := ""
 	turns := 0
 	for _, m := range msgs {
-		if m.Role == provider.RoleUser && IsUserAuthoredTurn(m.Content) {
+		if m.Role == provider.RoleUser && IsUserAuthoredTurn(UserMessageText(m)) {
 			turns++
 			if first == "" {
-				first = truncatePreview(UserPreviewText(m.Content))
+				first = truncatePreview(UserMessageText(m))
 			}
 		}
 	}

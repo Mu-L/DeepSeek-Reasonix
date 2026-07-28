@@ -284,13 +284,22 @@ Long tasks eventually fill the model's context window. Reasonix manages this wit
   TUI, desktop panel) but are excluded from active-memory retrieval. Memory
   search uses the same relative BM25 floor and guides the agent to fall back to
   history when exact original wording or tool output matters.
-- Agent-initiated `remember` and `forget` calls require a fresh human approval
-  each time, even when tool auto-approval or YOLO/full-access mode is enabled.
-  Guardian/safety review cannot answer these prompts on the user's behalf. In
-  non-interactive headless runs or sub-agents, these tools are refused rather
-  than auto-approved. The approval request includes a compact preview of the
-  memory being saved or archived, while external notification hooks only receive
-  the tool name.
+- Before each real user turn, bounded BM25 recall selects relevant active facts
+  from the raw user message and appends them as a low-authority user-turn suffix.
+  Generic turns are suppressed, project facts override equivalent global
+  fallbacks, stale facts are down-ranked, and recall is bounded by result/character
+  budgets. This never mutates the stable system prompt or tool schemas.
+- The owning controller may auto-allow only a bounded, non-sensitive,
+  create-only project/reference `remember`, including in a top-level headless
+  run. Global facts, preferences, feedback,
+  updates, duplicates, sensitive/oversized content, and every `forget` require a
+  fresh human approval even under Auto or YOLO. Guardian/safety review cannot
+  answer these prompts on the user's behalf. Sub-agents and headless surfaces
+  without the owning scoped controller fail closed. The approval request includes a compact preview, while
+  external notification hooks only receive the tool name.
+- Facts carry immutable IDs, monotonic revisions, timestamps, type, and scope.
+  Updates snapshot the previous revision; restore and archive recovery create a
+  higher revision and reject path escapes, symlinks, collisions, and overwrites.
   User-initiated memory edits in the local UI are already explicit user actions.
   See [`SESSION_MEMORY_RETRIEVAL.md`](SESSION_MEMORY_RETRIEVAL.md) for the
   detailed implementation contract.

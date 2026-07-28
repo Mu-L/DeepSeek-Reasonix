@@ -266,7 +266,9 @@ autonomy and let ordinary approval decisions proceed; `auto` still auto-approves
 the normal fallback but denies a command that matches an explicit ask rule rather
 than running it unattended; `dontAsk` denies; and `bypassPermissions` runs
 everything except tools that always require fresh human approval (memory, plan,
-sandbox escape, managed config write).
+sandbox escape, managed config write). In every mode, the owning top-level
+controller may still create a bounded, non-sensitive, create-only project or
+reference memory; all other memory mutations remain denied without a human.
 
 ## Additional directories
 
@@ -349,10 +351,33 @@ the displayed list matches the commands the TUI accepts.
 | `/verbose` | Toggle expanded reasoning display. |
 | `/sandbox` | Inspect sandbox status. |
 | `/goal` | Start, inspect, or clear a long-running goal. |
-| `/mcp`, `/skills`, `/hooks`, `/memory` | Inspect and manage extensions or memory. |
+| `/mcp`, `/skills`, `/hooks` | Inspect and manage extensions. |
+| `/remember <note>` | Append a standing note to the project instruction document; `# <note>` is a shortcut. |
+| `/memory [subcommand]` | Inspect instructions, memory provenance, recall, revisions, and recovery. |
 | `/rewind` | Restore conversation and/or code to an earlier turn. |
 | `/tree`, `/branch`, `/switch` | Inspect or navigate conversation branches. |
 
 Switching model, effort, or work mode rebuilds the runtime while preserving the
 active conversation, session-scoped permission overrides, additional directory
 access, and session ownership.
+
+### Memory diagnostics and recovery
+
+Bare `/memory` shows all active project/global facts without hiding same-name
+entries. Facts include their stable ID, revision, scope, type, freshness, and
+description. Slash completion offers the available subcommands, active IDs and
+names, and owned archive paths.
+
+| Command | Purpose |
+| --- | --- |
+| `/memory instructions` | Show resolved instruction precedence, directories, imports, and diagnostics. |
+| `/memory recall` | Explain the latest automatic recall query, hits, scores, reasons, freshness, and budget. |
+| `/memory revisions <id-or-name>` | Show the active revision and immutable history. |
+| `/memory restore <id-or-name> <revision>` | Restore old content as a new monotonic revision. |
+| `/memory archived` | List archived facts and their owned paths. |
+| `/memory recover <archive-path>` | Recover an archive as a new revision without overwriting active data. |
+
+These commands run against the active session controller. In a Remote Workbench
+they use the remote memory catalog and never fall back to local desktop memory.
+See [Context Engine v2](./SESSION_MEMORY_RETRIEVAL.md) for authority, automatic
+recall, write confirmation, and migration behavior.

@@ -12,7 +12,7 @@ Tool permission is independent of collaboration mode:
 | Mode | Behavior | Good for | Not ideal for |
 | --- | --- | --- | --- |
 | Ask | Request approval before controlled tools (writes, commands, etc.). | Unfamiliar repos, high-risk edits, production-related work, step-by-step review. | Many low-risk repeated operations, or when you already trust continuous execution. |
-| Auto | Auto-approve ordinary tool permissions; explicit `ask` / `deny` rules, plan confirmation, and memory write/delete still apply. | Daily code reading, small fixes, tests, normal implementation in a trusted workspace. | When you want every write or command confirmed by hand. |
+| Auto | Auto-approve ordinary tool permissions; explicit `ask` / `deny` rules and plan confirmation still apply. A bounded new project/reference memory can use the safe create-only path; other memory mutations still ask. | Daily code reading, small fixes, tests, normal implementation in a trusted workspace. | When you want every write or command confirmed by hand. |
 | Yolo | Skip ordinary tool permission prompts so writes and commands run with fewer interruptions; `deny` rules, plan confirmation, ask questions, and forced fresh approvals still apply. | Temporary branches, roll-backable worktrees, bulk mechanical edits after a confirmed plan. | Production, sensitive files, delete/publish/push, or unclear requirements. |
 
 ## Ask mode
@@ -43,7 +43,10 @@ Auto still respects:
 - Explicit `deny` rules.
 - Explicit `ask` rules.
 - Plan-mode “start execution” confirmation.
-- Fresh human approval for memory write/delete (`remember` / `forget`).
+- Fresh human approval for global, preference, feedback, update, duplicate,
+  sensitive, or oversized `remember` calls, and every `forget`. A new bounded,
+  non-sensitive project/reference fact can be classified as create-only and
+  saved without a prompt.
 - Human approval for nested or indirect Bash execution, even inside an approved-plan execution window. Guardian and allowing hooks cannot replace it; parameter/arithmetic expansions, assignments, redirects, and globs remain on Auto's fast path.
 - MCP destructive calls when the effective policy is `auto`, `prompt`, or `writes`.
 - Ask questions (never auto-answered).
