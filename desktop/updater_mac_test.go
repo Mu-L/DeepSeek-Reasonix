@@ -3,6 +3,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +14,44 @@ import (
 
 	"reasonix/internal/repair"
 )
+
+func installMacHandoffTestDeps(
+	t *testing.T,
+	tx *repair.UpdateTransaction,
+	pendingPath string,
+	logPath string,
+	claim func(string, string, time.Duration) (*repair.UpdateTransaction, func(), error),
+) {
+	t.Helper()
+	originalRead := readMacUpdateHandoff
+	originalClaim := claimMacUpdateHandoff
+	originalClear := clearMacUpdateHandoff
+	originalVerify := verifyMacHandoffApp
+	originalLogPath := macHandoffLogPath
+	readMacUpdateHandoff = func() (*repair.UpdateTransaction, error) {
+		copy := *tx
+		return &copy, nil
+	}
+	if claim == nil {
+		claim = func(string, string, time.Duration) (*repair.UpdateTransaction, func(), error) {
+			copy := *tx
+			return &copy, func() {}, nil
+		}
+	}
+	claimMacUpdateHandoff = claim
+	clearMacUpdateHandoff = func(*repair.UpdateTransaction) error {
+		return os.Remove(pendingPath)
+	}
+	verifyMacHandoffApp = func(string) error { return nil }
+	macHandoffLogPath = func() string { return logPath }
+	t.Cleanup(func() {
+		readMacUpdateHandoff = originalRead
+		claimMacUpdateHandoff = originalClaim
+		clearMacUpdateHandoff = originalClear
+		verifyMacHandoffApp = originalVerify
+		macHandoffLogPath = originalLogPath
+	})
+}
 
 func TestMacUpdateHandoffWaitsForExactProcessAndRollsBackLaunchFailure(t *testing.T) {
 	root := t.TempDir()
@@ -35,6 +74,17 @@ func TestMacUpdateHandoffWaitsForExactProcessAndRollsBackLaunchFailure(t *testin
 	if err := os.WriteFile(pending, []byte("pending"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	tx := &repair.UpdateTransaction{
+		ToVersion:          "v2",
+		CreatedAt:          "2026-07-28T00:00:00Z",
+		TargetKind:         "app-bundle",
+		TargetPath:         oldApp,
+		BackupPath:         backupApp,
+		HandoffAppPath:     newApp,
+		HandoffStagingPath: filepath.Dir(newApp),
+		HandoffOwnerPID:    99999999,
+	}
+	installMacHandoffTestDeps(t, tx, pending, logPath, nil)
 
 	originalOpen := openCommand
 	openCommand = func(args ...string) *exec.Cmd {
@@ -44,14 +94,8 @@ func TestMacUpdateHandoffWaitsForExactProcessAndRollsBackLaunchFailure(t *testin
 	t.Cleanup(func() { openCommand = originalOpen })
 
 	code := runMacUpdateHandoff(macUpdateHandoffConfig{
-		OldApp:        oldApp,
-		NewApp:        newApp,
-		BackupApp:     backupApp,
-		PendingUpdate: pending,
-		Staging:       filepath.Dir(newApp),
-		LogPath:       logPath,
-		// Non-existent PID: wait returns immediately.
-		OldPID: 99999999,
+		ToVersion: tx.ToVersion,
+		CreatedAt: tx.CreatedAt,
 	})
 	if code == 0 {
 		t.Fatal("handoff should fail when LaunchServices rejects the replacement")
@@ -97,6 +141,30 @@ func TestMacUpdateHandoffHoldsMutationLockDuringSwap(t *testing.T) {
 	if err := os.WriteFile(pending, []byte("pending"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	tx := &repair.UpdateTransaction{
+		ToVersion:          "v2",
+		CreatedAt:          "2026-07-28T00:00:00Z",
+		TargetKind:         "app-bundle",
+		TargetPath:         oldApp,
+		BackupPath:         backupApp,
+		HandoffAppPath:     newApp,
+		HandoffStagingPath: filepath.Dir(newApp),
+		HandoffOwnerPID:    99999999,
+	}
+	installMacHandoffTestDeps(
+		t,
+		tx,
+		pending,
+		filepath.Join(root, "update.log"),
+		func(string, string, time.Duration) (*repair.UpdateTransaction, func(), error) {
+			unlock, err := repair.LockRepairMutationsTimeout(2*time.Second, oldApp, backupApp)
+			if err != nil {
+				return nil, nil, err
+			}
+			copy := *tx
+			return &copy, unlock, nil
+		},
+	)
 
 	// Hold the target lock first: handoff must wait, not race past Guard.
 	holder, err := repair.LockRepairMutations(oldApp)
@@ -115,13 +183,8 @@ func TestMacUpdateHandoffHoldsMutationLockDuringSwap(t *testing.T) {
 	go func() {
 		close(started)
 		done <- runMacUpdateHandoff(macUpdateHandoffConfig{
-			OldApp:        oldApp,
-			NewApp:        newApp,
-			BackupApp:     backupApp,
-			PendingUpdate: pending,
-			Staging:       filepath.Dir(newApp),
-			LogPath:       filepath.Join(root, "update.log"),
-			OldPID:        99999999,
+			ToVersion: tx.ToVersion,
+			CreatedAt: tx.CreatedAt,
 		})
 	}()
 	<-started
@@ -144,6 +207,65 @@ func TestMacUpdateHandoffHoldsMutationLockDuringSwap(t *testing.T) {
 	}
 	if got, err := os.ReadFile(filepath.Join(oldApp, "marker")); err != nil || string(got) != "new" {
 		t.Fatalf("bundle after handoff = %q, %v", got, err)
+	}
+}
+
+func TestMacUpdateHandoffReverifiesStagedBundleBeforeSwap(t *testing.T) {
+	root := t.TempDir()
+	oldApp := filepath.Join(root, "Reasonix.app")
+	newApp := filepath.Join(root, "staging", "Reasonix.app")
+	backupApp := oldApp + ".reasonix-update-backup"
+	pending := filepath.Join(root, "pending.json")
+	for _, dir := range []string{oldApp, newApp} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(oldApp, "marker"), []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(newApp, "marker"), []byte("new"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pending, []byte("pending"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tx := &repair.UpdateTransaction{
+		ToVersion:          "v2",
+		CreatedAt:          "2026-07-28T00:00:00Z",
+		TargetKind:         "app-bundle",
+		TargetPath:         oldApp,
+		BackupPath:         backupApp,
+		HandoffAppPath:     newApp,
+		HandoffStagingPath: filepath.Dir(newApp),
+		HandoffOwnerPID:    99999999,
+	}
+	installMacHandoffTestDeps(t, tx, pending, filepath.Join(root, "update.log"), nil)
+	verifyMacHandoffApp = func(string) error { return fmt.Errorf("signature changed") }
+
+	code := runMacUpdateHandoff(macUpdateHandoffConfig{ToVersion: tx.ToVersion, CreatedAt: tx.CreatedAt})
+	if code == 0 {
+		t.Fatal("handoff accepted a staged bundle that failed re-verification")
+	}
+	if got, err := os.ReadFile(filepath.Join(oldApp, "marker")); err != nil || string(got) != "old" {
+		t.Fatalf("installed bundle changed after verification failure: %q, %v", got, err)
+	}
+	if _, err := os.Stat(backupApp); !os.IsNotExist(err) {
+		t.Fatalf("backup was created after verification failure: %v", err)
+	}
+	if _, err := os.Stat(pending); !os.IsNotExist(err) {
+		t.Fatalf("pending transaction was not cleared: %v", err)
+	}
+}
+
+func TestMacUpdateHandoffParserRejectsFilesystemPaths(t *testing.T) {
+	_, err := parseMacUpdateHandoffArgs([]string{
+		"-to-version", "v2",
+		"-created-at", "2026-07-28T00:00:00Z",
+		"-old-app", "/tmp/Unrelated.app",
+	})
+	if err == nil {
+		t.Fatal("legacy filesystem path argument was accepted")
 	}
 }
 

@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -25,10 +24,24 @@ const (
 	macUpdateHandoffLockTimeout = 2 * time.Minute
 )
 
-// openCommand is a test seam so handoff tests can inject a failing open(1).
-var openCommand = func(args ...string) *exec.Cmd {
-	return exec.Command("open", args...)
-}
+var (
+	// Test seams keep desktop tests independent of a real signed bundle and the
+	// process executable path used by repair transaction validation.
+	openCommand = func(args ...string) *exec.Cmd {
+		return exec.Command("open", args...)
+	}
+	readMacUpdateHandoff  = repair.ReadPendingUpdate
+	claimMacUpdateHandoff = repair.ClaimPendingAppBundleUpdateHandoff
+	clearMacUpdateHandoff = repair.ClearClaimedAppBundleUpdateHandoff
+	verifyMacHandoffApp   = verifyMacApp
+	macHandoffLogPath     = func() string {
+		cacheDir, err := updateCacheDir()
+		if err != nil {
+			return ""
+		}
+		return filepath.Join(cacheDir, "update-helper.log")
+	}
+)
 
 func applyMac(zipPath, targetVersion string) error {
 	if !macSelfUpdateAllowed() {
@@ -59,18 +72,20 @@ func applyMac(zipPath, targetVersion string) error {
 		return err
 	}
 	backupApp := currentApp + ".reasonix-update-backup"
-	if _, err := repair.PrepareAppBundleUpdate(version, targetVersion, currentApp, backupApp); err != nil {
-		return err
-	}
-	cacheDir, err := updateCacheDir()
-	if err != nil {
-		_ = repair.CancelPendingUpdate(targetVersion)
-		return err
-	}
-	logPath := filepath.Join(cacheDir, "update-helper.log")
 	exe, err := os.Executable()
 	if err != nil {
-		_ = repair.CancelPendingUpdate(targetVersion)
+		return err
+	}
+	tx, err := repair.PrepareAppBundleUpdateHandoff(
+		version,
+		targetVersion,
+		currentApp,
+		backupApp,
+		nextApp,
+		staging,
+		os.Getpid(),
+	)
+	if err != nil {
 		return err
 	}
 	// Detach a self-subprocess that holds the shared repair mutation lock for
@@ -78,13 +93,8 @@ func applyMac(zipPath, targetVersion string) error {
 	// the binary that performs the directory swap must take LockRepairMutations.
 	cmd := exec.Command(exe,
 		macUpdateHandoffArg,
-		"-old-app", currentApp,
-		"-new-app", nextApp,
-		"-backup-app", backupApp,
-		"-pending-update", repair.PendingUpdatePath(),
-		"-staging", staging,
-		"-log", logPath,
-		"-old-pid", strconv.Itoa(os.Getpid()),
+		"-to-version", tx.ToVersion,
+		"-created-at", tx.CreatedAt,
 	)
 	if err := cmd.Start(); err != nil {
 		_ = repair.CancelPendingUpdate(targetVersion)
@@ -109,36 +119,31 @@ func maybeRunMacUpdateHandoff(args []string) (handled bool, exitCode int) {
 }
 
 type macUpdateHandoffConfig struct {
-	OldApp        string
-	NewApp        string
-	BackupApp     string
-	PendingUpdate string
-	Staging       string
-	LogPath       string
-	OldPID        int
+	ToVersion string
+	CreatedAt string
 }
 
 func parseMacUpdateHandoffArgs(args []string) (macUpdateHandoffConfig, error) {
 	fs := flag.NewFlagSet("reasonix-mac-update-handoff", flag.ContinueOnError)
 	var cfg macUpdateHandoffConfig
-	fs.StringVar(&cfg.OldApp, "old-app", "", "current app bundle path")
-	fs.StringVar(&cfg.NewApp, "new-app", "", "replacement app bundle path")
-	fs.StringVar(&cfg.BackupApp, "backup-app", "", "backup app bundle path")
-	fs.StringVar(&cfg.PendingUpdate, "pending-update", "", "pending update transaction path")
-	fs.StringVar(&cfg.Staging, "staging", "", "staging directory to remove on success")
-	fs.StringVar(&cfg.LogPath, "log", "", "handoff log path")
-	fs.IntVar(&cfg.OldPID, "old-pid", 0, "desktop PID to wait for")
+	fs.StringVar(&cfg.ToVersion, "to-version", "", "pending update target version")
+	fs.StringVar(&cfg.CreatedAt, "created-at", "", "pending update creation timestamp")
 	if err := fs.Parse(args); err != nil {
 		return macUpdateHandoffConfig{}, err
 	}
-	if cfg.OldApp == "" || cfg.NewApp == "" || cfg.BackupApp == "" || cfg.PendingUpdate == "" || cfg.OldPID <= 0 {
+	if fs.NArg() != 0 {
+		return macUpdateHandoffConfig{}, fmt.Errorf("unexpected handoff arguments")
+	}
+	cfg.ToVersion = strings.TrimSpace(cfg.ToVersion)
+	cfg.CreatedAt = strings.TrimSpace(cfg.CreatedAt)
+	if cfg.ToVersion == "" || cfg.CreatedAt == "" {
 		return macUpdateHandoffConfig{}, fmt.Errorf("missing required handoff arguments")
 	}
 	return cfg, nil
 }
 
 func runMacUpdateHandoff(cfg macUpdateHandoffConfig) int {
-	logFile := appendMacHandoffLog(cfg.LogPath)
+	logFile := appendMacHandoffLog(macHandoffLogPath())
 	logf := func(format string, args ...any) {
 		msg := fmt.Sprintf(format, args...)
 		fmt.Fprintln(os.Stderr, msg)
@@ -149,73 +154,93 @@ func runMacUpdateHandoff(cfg macUpdateHandoffConfig) int {
 	if logFile != nil {
 		defer logFile.Close()
 	}
-	logf("macOS update handoff started for PID %d", cfg.OldPID)
+	pending, err := readMacUpdateHandoff()
+	if err != nil {
+		logf("cannot read pending update handoff: %v", err)
+		return 1
+	}
+	if strings.TrimSpace(pending.ToVersion) != cfg.ToVersion ||
+		strings.TrimSpace(pending.CreatedAt) != cfg.CreatedAt ||
+		pending.HandoffOwnerPID <= 0 {
+		logf("pending update does not match handoff identity")
+		return 1
+	}
+	logf("macOS update handoff started for PID %d", pending.HandoffOwnerPID)
 
 	// Wait for the exact desktop PID before taking mutation locks so a long
 	// exit wait does not block unrelated project repairs.
-	if err := waitForPIDExit(cfg.OldPID, 60*time.Second); err != nil {
-		logf("timed out waiting for PID %d to exit: %v", cfg.OldPID, err)
-		_ = os.Remove(cfg.PendingUpdate)
-		_ = os.RemoveAll(cfg.Staging)
-		_ = openCommand(cfg.OldApp).Start()
+	if err := waitForPIDExit(pending.HandoffOwnerPID, 60*time.Second); err != nil {
+		logf("timed out waiting for PID %d to exit: %v", pending.HandoffOwnerPID, err)
+		if claimed, release, claimErr := claimMacUpdateHandoff(cfg.ToVersion, cfg.CreatedAt, macUpdateHandoffLockTimeout); claimErr == nil {
+			if clearErr := clearMacUpdateHandoff(claimed); clearErr != nil {
+				logf("failed to clear timed-out handoff: %v", clearErr)
+			}
+			_ = os.RemoveAll(claimed.HandoffStagingPath)
+			release()
+		}
 		return 1
 	}
 
-	// Hold the same target locks as Guard rollback for the directory swap so
-	// concurrent restore cannot interleave with ditto and produce a mixed bundle.
-	unlock, err := repair.LockRepairMutationsTimeout(macUpdateHandoffLockTimeout, cfg.OldApp, cfg.BackupApp)
+	// Claim re-reads the full pending transaction while holding both its state
+	// lock and the same target locks as Guard rollback.
+	claimed, release, err := claimMacUpdateHandoff(cfg.ToVersion, cfg.CreatedAt, macUpdateHandoffLockTimeout)
 	if err != nil {
-		logf("failed to acquire mutation lock: %v", err)
-		_ = os.Remove(cfg.PendingUpdate)
-		_ = os.RemoveAll(cfg.Staging)
-		_ = openCommand(cfg.OldApp).Start()
+		logf("failed to claim pending update handoff: %v", err)
 		return 1
 	}
-	defer unlock()
-
-	// A concurrent Guard rollback may have already consumed the pending
-	// transaction while we waited for the desktop to exit.
-	if _, err := os.Stat(cfg.PendingUpdate); err != nil {
-		logf("pending update missing after wait; aborting handoff: %v", err)
-		_ = os.RemoveAll(cfg.Staging)
+	defer release()
+	oldApp := claimed.TargetPath
+	newApp := claimed.HandoffAppPath
+	backupApp := claimed.BackupPath
+	staging := claimed.HandoffStagingPath
+	clearPending := func() {
+		if err := clearMacUpdateHandoff(claimed); err != nil {
+			logf("failed to clear pending update handoff: %v", err)
+		}
+	}
+	if err := verifyMacHandoffApp(newApp); err != nil {
+		logf("replacement app bundle no longer verifies: %v", err)
+		clearPending()
+		_ = os.RemoveAll(staging)
+		_ = openCommand(oldApp).Start()
 		return 1
 	}
 
 	rollback := func() {
 		logf("rolling back macOS update")
-		_ = os.RemoveAll(cfg.OldApp)
-		if err := os.Rename(cfg.BackupApp, cfg.OldApp); err != nil {
+		_ = os.RemoveAll(oldApp)
+		if err := os.Rename(backupApp, oldApp); err != nil {
 			logf("failed to restore backup bundle: %v", err)
 		}
-		_ = os.Remove(cfg.PendingUpdate)
-		_ = exec.Command("xattr", "-dr", "com.apple.quarantine", cfg.OldApp).Run()
-		if err := openCommand("-n", cfg.OldApp).Run(); err != nil {
-			_ = openCommand(cfg.OldApp).Run()
+		clearPending()
+		_ = exec.Command("xattr", "-dr", "com.apple.quarantine", oldApp).Run()
+		if err := openCommand("-n", oldApp).Run(); err != nil {
+			_ = openCommand(oldApp).Run()
 		}
-		_ = os.RemoveAll(cfg.Staging)
+		_ = os.RemoveAll(staging)
 	}
 
-	_ = os.RemoveAll(cfg.BackupApp)
-	if err := os.Rename(cfg.OldApp, cfg.BackupApp); err != nil {
+	_ = os.RemoveAll(backupApp)
+	if err := os.Rename(oldApp, backupApp); err != nil {
 		logf("failed to move current app bundle to backup: %v", err)
-		_ = os.Remove(cfg.PendingUpdate)
-		_ = os.RemoveAll(cfg.Staging)
-		_ = openCommand(cfg.OldApp).Start()
+		clearPending()
+		_ = os.RemoveAll(staging)
+		_ = openCommand(oldApp).Start()
 		return 1
 	}
-	if err := exec.Command("ditto", cfg.NewApp, cfg.OldApp).Run(); err != nil {
+	if err := exec.Command("ditto", newApp, oldApp).Run(); err != nil {
 		logf("failed to copy replacement app bundle: %v", err)
 		rollback()
 		return 1
 	}
-	_ = exec.Command("xattr", "-dr", "com.apple.quarantine", cfg.OldApp).Run()
-	if err := openCommand("-n", cfg.OldApp).Run(); err != nil {
+	_ = exec.Command("xattr", "-dr", "com.apple.quarantine", oldApp).Run()
+	if err := openCommand("-n", oldApp).Run(); err != nil {
 		logf("LaunchServices rejected the replacement app bundle: %v", err)
 		rollback()
 		return 1
 	}
 	logf("replacement app bundle launched")
-	_ = os.RemoveAll(cfg.Staging)
+	_ = os.RemoveAll(staging)
 	return 0
 }
 

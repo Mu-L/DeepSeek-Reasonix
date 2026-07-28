@@ -15,6 +15,25 @@ func repairMutationTestKey(path string) string {
 	return canonicalRepairPath(path)
 }
 
+func TestCanonicalRepairPathUsesFilesystemCaseSemantics(t *testing.T) {
+	root := t.TempDir()
+	upper := filepath.Join(root, "Project")
+	lower := filepath.Join(root, "project")
+
+	original := repairPathCaseInsensitive
+	t.Cleanup(func() { repairPathCaseInsensitive = original })
+
+	repairPathCaseInsensitive = func(string) bool { return false }
+	if canonicalRepairPath(upper) == canonicalRepairPath(lower) {
+		t.Fatal("case-sensitive filesystem identities were conflated")
+	}
+
+	repairPathCaseInsensitive = func(string) bool { return true }
+	if canonicalRepairPath(upper) != canonicalRepairPath(lower) {
+		t.Fatal("case-insensitive filesystem aliases did not converge")
+	}
+}
+
 func TestDecodeRepairPlanRejectsUnknownFieldsAndActions(t *testing.T) {
 	tests := []string{
 		`{"schemaVersion":1,"summary":"x","actions":[{"type":"run_shell","reason":"x"}]}`,

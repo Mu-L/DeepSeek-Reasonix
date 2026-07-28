@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -30,6 +29,8 @@ var repairMutationBeforeRename = func(string) {}
 // repairMutationAfterRename is a test seam for forcing an uncooperative writer
 // to create a new target after the confirmed node has been quarantined.
 var repairMutationAfterRename = func(string) {}
+
+var repairPathCaseInsensitive = platformRepairPathCaseInsensitive
 
 func lockRepairTransaction() (func(), error) {
 	unlock, err := lockRepairMutations(repairTransactionPath())
@@ -67,8 +68,9 @@ func restoreRepairNodeIfAbsent(backup, target string) error {
 // mutation locks and preview identity. Parent-directory symlinks are followed
 // so alias paths converge, but the leaf name is never resolved: repair mutates
 // the leaf node itself via Lstat/Rename (including when the leaf is a symlink).
-// Case-insensitive platforms fold case so /Project and /project cannot take
-// different locks.
+// Case-insensitive filesystems fold case so /Project and /project cannot take
+// different locks. The decision is made from the target's actual parent
+// directory: macOS and Windows can both host case-sensitive directories.
 func canonicalRepairPath(path string) string {
 	path = strings.TrimSpace(path)
 	if path == "" {
@@ -80,11 +82,26 @@ func canonicalRepairPath(path string) string {
 	}
 	absolute = resolveParentSymlinkPath(absolute)
 	absolute = filepath.Clean(absolute)
-	switch runtime.GOOS {
-	case "windows", "darwin":
+	if repairPathCaseInsensitive(absolute) {
 		return strings.ToLower(filepath.ToSlash(absolute))
-	default:
-		return absolute
+	}
+	return absolute
+}
+
+// existingRepairPathParent returns the closest existing directory that governs
+// name lookup for path. It also handles create-only targets whose immediate
+// parent has not been created yet.
+func existingRepairPathParent(path string) string {
+	dir := filepath.Dir(path)
+	for {
+		if info, err := os.Stat(dir); err == nil && info.IsDir() {
+			return dir
+		}
+		next := filepath.Dir(dir)
+		if next == dir {
+			return ""
+		}
+		dir = next
 	}
 }
 
