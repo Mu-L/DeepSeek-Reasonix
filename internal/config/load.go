@@ -571,6 +571,16 @@ func ValidateFile(path string) error {
 	return nil
 }
 
+// ValidateBytes parses one in-memory TOML config without loading credentials,
+// applying migrations, or writing any state.
+func ValidateBytes(data []byte) error {
+	cfg := Default()
+	if _, err := decodeTOMLBytes(data, cfg); err != nil {
+		return fmt.Errorf("config: %w", err)
+	}
+	return nil
+}
+
 func loadForEdit(path string, loadCredentials, persistMigrations bool) *Config {
 	cfg, err := loadForEditStrict(path, loadCredentials, persistMigrations)
 	if err == nil {

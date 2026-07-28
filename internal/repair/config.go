@@ -31,9 +31,34 @@ type ConfigOptions struct {
 	IncludeProject bool
 	OnlyScope      string
 	Now            func() time.Time
+
+	expectedStates         map[string]string
+	confirmedGlobalRestore []byte
+	hasConfirmedRestore    bool
 }
 
 func InspectAndRepairConfig(opts ConfigOptions) (ConfigReport, error) {
+	if !opts.Apply {
+		return inspectAndRepairConfigUnlocked(opts)
+	}
+	unlockTransaction, err := lockRepairTransaction()
+	if err != nil {
+		return ConfigReport{}, err
+	}
+	defer unlockTransaction()
+	paths, err := configRepairTargetPaths(opts)
+	if err != nil {
+		return ConfigReport{}, err
+	}
+	unlock, err := lockRepairMutations(paths...)
+	if err != nil {
+		return ConfigReport{}, err
+	}
+	defer unlock()
+	return inspectAndRepairConfigUnlocked(opts)
+}
+
+func inspectAndRepairConfigUnlocked(opts ConfigOptions) (ConfigReport, error) {
 	if opts.OnlyScope != "" && opts.OnlyScope != "global" && opts.OnlyScope != "project" {
 		return ConfigReport{}, fmt.Errorf("unknown config repair scope %q", opts.OnlyScope)
 	}
@@ -57,9 +82,40 @@ func InspectAndRepairConfig(opts ConfigOptions) (ConfigReport, error) {
 		if !opts.Apply || !check.Exists || check.Valid || (opts.OnlyScope != "" && item.scope != opts.OnlyScope) || (item.scope == "project" && !opts.IncludeProject) {
 			continue
 		}
+		if err := verifyRepairPlanFileState(item.path, opts.expectedStates); err != nil {
+			return report, err
+		}
+		if item.scope == "global" {
+			if err := verifyRepairPlanFileState(lastKnownGoodConfigPath(), opts.expectedStates); err != nil {
+				return report, err
+			}
+		}
+		repairMutationBeforeRename(item.path)
+		if err := verifyRepairPlanFileState(item.path, opts.expectedStates); err != nil {
+			return report, err
+		}
+		if item.scope == "global" {
+			if err := verifyRepairPlanFileState(lastKnownGoodConfigPath(), opts.expectedStates); err != nil {
+				return report, err
+			}
+		}
 		quarantine := item.path + ".reasonix-quarantine-" + opts.Now().UTC().Format("20060102T150405Z")
 		if err := os.Rename(item.path, quarantine); err != nil {
 			return report, fmt.Errorf("quarantine %s config: %w", item.scope, err)
+		}
+		repairMutationAfterRename(item.path)
+		if _, err := os.Lstat(item.path); err == nil {
+			return report, fmt.Errorf("repair plan preview changed since confirmation; target was recreated during quarantine; confirmed state remains at %s", quarantine)
+		} else if !os.IsNotExist(err) {
+			return report, err
+		}
+		if expected := opts.expectedStates[item.path]; expected != "" {
+			if err := verifyRepairPlanStateID(quarantine, expected); err != nil {
+				if restoreErr := restoreRepairNodeIfAbsent(quarantine, item.path); restoreErr != nil {
+					return report, fmt.Errorf("quarantine %s config changed after confirmation and restore failed: %v: %w", item.scope, restoreErr, err)
+				}
+				return report, err
+			}
 		}
 		report.Applied = append(report.Applied, "quarantined "+item.scope+" config at "+quarantine)
 		tx.Changes = append(tx.Changes, RepairChange{TargetPath: item.path, PreviousPath: quarantine, Scope: item.scope})
@@ -68,8 +124,20 @@ func InspectAndRepairConfig(opts ConfigOptions) (ConfigReport, error) {
 			return report, err
 		}
 		if item.scope == "global" {
-			if err := restoreLastKnownGoodConfig(item.path); err == nil {
+			restoreErr := os.ErrNotExist
+			if opts.expectedStates != nil {
+				if opts.hasConfirmedRestore {
+					if restoreErr = config.ValidateBytes(opts.confirmedGlobalRestore); restoreErr == nil {
+						restoreErr = fileutil.AtomicCreateFile(item.path, opts.confirmedGlobalRestore, 0o600)
+					}
+				}
+			} else {
+				restoreErr = restoreLastKnownGoodConfig(item.path)
+			}
+			if restoreErr == nil {
 				report.Applied = append(report.Applied, "restored global config from last-known-good snapshot")
+			} else if opts.expectedStates != nil && opts.hasConfirmedRestore {
+				return report, fmt.Errorf("restore confirmed last-known-good config: %w", restoreErr)
 			}
 		}
 		report.Checks[len(report.Checks)-1] = inspectConfig(item.scope, item.path)
@@ -81,6 +149,28 @@ func InspectAndRepairConfig(opts ConfigOptions) (ConfigReport, error) {
 		appendRepairLogBestEffort(tx)
 	}
 	return report, nil
+}
+
+func configRepairTargetPaths(opts ConfigOptions) ([]string, error) {
+	if opts.OnlyScope != "" && opts.OnlyScope != "global" && opts.OnlyScope != "project" {
+		return nil, fmt.Errorf("unknown config repair scope %q", opts.OnlyScope)
+	}
+	project := filepath.Join(opts.Root, "reasonix.toml")
+	if opts.Root == "" || opts.Root == "." {
+		project = "reasonix.toml"
+	}
+	switch opts.OnlyScope {
+	case "global":
+		return []string{config.UserConfigPath()}, nil
+	case "project":
+		return []string{project}, nil
+	default:
+		paths := []string{config.UserConfigPath()}
+		if opts.IncludeProject {
+			paths = append(paths, project)
+		}
+		return paths, nil
+	}
 }
 
 func inspectConfig(scope, path string) ConfigCheck {

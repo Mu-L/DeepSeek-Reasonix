@@ -280,6 +280,14 @@ func RollbackPendingUpdate() (UpdateRollbackResult, error) {
 }
 
 func rollbackPendingUpdate(expectedToVersion, expectedCreatedAt string) (UpdateRollbackResult, error) {
+	return rollbackPendingUpdateMatching(expectedToVersion, expectedCreatedAt, "")
+}
+
+func rollbackPendingUpdateState(expectedStateID string) (UpdateRollbackResult, error) {
+	return rollbackPendingUpdateMatching("", "", expectedStateID)
+}
+
+func rollbackPendingUpdateMatching(expectedToVersion, expectedCreatedAt, expectedStateID string) (UpdateRollbackResult, error) {
 	// The expected-match checks below re-run under the lock, so a transaction
 	// committed, cancelled, or replaced while waiting here is never acted upon.
 	unlock := lockPendingUpdate()
@@ -295,6 +303,9 @@ func rollbackPendingUpdate(expectedToVersion, expectedCreatedAt string) (UpdateR
 		return UpdateRollbackResult{}, nil
 	}
 	if expected := strings.TrimSpace(expectedCreatedAt); expected != "" && expected != strings.TrimSpace(tx.CreatedAt) {
+		return UpdateRollbackResult{}, nil
+	}
+	if expected := strings.TrimSpace(expectedStateID); expected != "" && expected != repairPlanStateID(tx) {
 		return UpdateRollbackResult{}, nil
 	}
 	result := UpdateRollbackResult{FromVersion: tx.ToVersion, ToVersion: tx.FromVersion, TargetPath: tx.TargetPath}

@@ -116,5 +116,15 @@ same invocation. Direct package callers that own their own approval boundary
 remain source compatible and can opt into the same check with
 `ApplyPlanOptions.ExpectedPreviewID`.
 
+Confirmed configuration, snapshot, and derived-state mutations are serialized
+across Reasonix processes. Repair transaction bookkeeping and undo are
+serialized before per-target locks, so disjoint repairs cannot exchange or lose
+undo records. After taking the target lock, Guard re-checks the confirmed action
+and its inputs, then verifies the node moved by the final rename. A process that
+recreates the target during repair wins: Guard does not overwrite the new file
+and reports that the confirmed state was moved aside. Pending-update rollback
+uses the complete confirmed transaction identity, not only its version or
+timestamp.
+
 All state files are additive and optional. Older Reasonix releases ignore them;
 missing new fields decode to their safe zero values.

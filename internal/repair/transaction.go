@@ -175,6 +175,11 @@ func validateRepairChange(change RepairChange) error {
 // UndoLastRepair restores the exact files moved aside by the latest repair. Any
 // currently repaired file is retained as a timestamped redo candidate.
 func UndoLastRepair() (*RepairTransaction, error) {
+	unlockTransaction, err := lockRepairTransaction()
+	if err != nil {
+		return nil, err
+	}
+	defer unlockTransaction()
 	tx, err := ReadLastRepair()
 	if err != nil {
 		return nil, err
@@ -182,6 +187,15 @@ func UndoLastRepair() (*RepairTransaction, error) {
 	if tx.Undone {
 		return nil, fmt.Errorf("repair %s was already undone", tx.ID)
 	}
+	targets := make([]string, 0, len(tx.Changes))
+	for _, change := range tx.Changes {
+		targets = append(targets, change.TargetPath)
+	}
+	unlockTargets, err := lockRepairMutations(targets...)
+	if err != nil {
+		return nil, err
+	}
+	defer unlockTargets()
 	now := time.Now().UTC()
 	for _, change := range tx.Changes {
 		if change.RemoveOnUndo || change.Undone {

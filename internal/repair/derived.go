@@ -12,6 +12,28 @@ import (
 )
 
 func RebuildDerivedState(target string) ([]string, error) {
+	unlockTransaction, err := lockRepairTransaction()
+	if err != nil {
+		return nil, err
+	}
+	defer unlockTransaction()
+	paths, err := derivedStateTargetPaths(target)
+	if err != nil {
+		return nil, err
+	}
+	unlock, err := lockRepairMutations(paths...)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	return rebuildDerivedStateUnlocked(target)
+}
+
+func rebuildDerivedStateUnlocked(target string) ([]string, error) {
+	return rebuildDerivedStateBoundUnlocked(target, nil)
+}
+
+func rebuildDerivedStateBoundUnlocked(target string, expectedStates map[string]string) ([]string, error) {
 	target = strings.ToLower(strings.TrimSpace(target))
 	paths := derivedStatePaths()
 	var names []string
@@ -39,9 +61,30 @@ func RebuildDerivedState(target string) ([]string, error) {
 			}
 			return applied, err
 		}
+		if err := verifyRepairPlanFileState(path, expectedStates); err != nil {
+			return applied, err
+		}
+		repairMutationBeforeRename(path)
+		if err := verifyRepairPlanFileState(path, expectedStates); err != nil {
+			return applied, err
+		}
 		quarantine := path + ".reasonix-rebuild-" + stamp
 		if err := os.Rename(path, quarantine); err != nil {
 			return applied, err
+		}
+		repairMutationAfterRename(path)
+		if _, err := os.Lstat(path); err == nil {
+			return applied, fmt.Errorf("repair plan preview changed since confirmation; target was recreated during quarantine; confirmed state remains at %s", quarantine)
+		} else if !os.IsNotExist(err) {
+			return applied, err
+		}
+		if expected := expectedStates[path]; expected != "" {
+			if err := verifyRepairPlanStateID(quarantine, expected); err != nil {
+				if restoreErr := restoreRepairNodeIfAbsent(quarantine, path); restoreErr != nil {
+					return applied, fmt.Errorf("derived state changed after confirmation and restore failed: %v: %w", restoreErr, err)
+				}
+				return applied, err
+			}
 		}
 		applied = append(applied, quarantine)
 		tx.Changes = append(tx.Changes, RepairChange{Scope: "derived:" + name, TargetPath: path, PreviousPath: quarantine})
@@ -54,6 +97,33 @@ func RebuildDerivedState(target string) ([]string, error) {
 		appendRepairLogBestEffort(tx)
 	}
 	return applied, nil
+}
+
+func derivedStateTargetPaths(target string) ([]string, error) {
+	target = strings.ToLower(strings.TrimSpace(target))
+	paths := derivedStatePaths()
+	if target == "all" {
+		names := make([]string, 0, len(paths))
+		for name := range paths {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		out := make([]string, 0, len(names))
+		for _, name := range names {
+			if path := paths[name]; path != "" {
+				out = append(out, path)
+			}
+		}
+		return out, nil
+	}
+	path, ok := paths[target]
+	if !ok {
+		return nil, fmt.Errorf("unknown derived-state target %q (want tabs|projects|window|zoom|all)", target)
+	}
+	if path == "" {
+		return []string{}, nil
+	}
+	return []string{path}, nil
 }
 
 func derivedStatePaths() map[string]string {

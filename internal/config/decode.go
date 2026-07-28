@@ -11,5 +11,9 @@ func decodeTOMLFile(path string, v any) (toml.MetaData, error) {
 	if err != nil {
 		return toml.MetaData{}, err
 	}
-	return toml.Decode(string(data), v)
+	return decodeTOMLBytes(data, v)
+}
+
+func decodeTOMLBytes(data []byte, v any) (toml.MetaData, error) {
+	return toml.Decode(string(fileencoding.DecodeToUTF8(data)), v)
 }

@@ -95,6 +95,28 @@ func ListConfigSnapshots() ([]ConfigSnapshot, error) {
 }
 
 func RestoreConfigSnapshot(id string) (*RepairTransaction, error) {
+	dest := config.UserConfigPath()
+	if dest == "" {
+		return nil, fmt.Errorf("global config path is unavailable")
+	}
+	unlockTransaction, err := lockRepairTransaction()
+	if err != nil {
+		return nil, err
+	}
+	defer unlockTransaction()
+	unlock, err := lockRepairMutations(dest)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	return restoreConfigSnapshotUnlocked(id)
+}
+
+func restoreConfigSnapshotUnlocked(id string) (*RepairTransaction, error) {
+	return restoreConfigSnapshotBoundUnlocked(id, nil, nil)
+}
+
+func restoreConfigSnapshotBoundUnlocked(id string, expectedStates map[string]string, confirmedSnapshot []byte) (*RepairTransaction, error) {
 	snapshots, err := ListConfigSnapshots()
 	if err != nil {
 		return nil, err
@@ -109,15 +131,37 @@ func RestoreConfigSnapshot(id string) (*RepairTransaction, error) {
 	if selected == nil {
 		return nil, fmt.Errorf("config snapshot %q not found", id)
 	}
-	if err := verifyConfigSnapshot(*selected); err != nil {
-		return nil, err
+	if expectedStates == nil {
+		if err := verifyConfigSnapshot(*selected); err != nil {
+			return nil, err
+		}
+	} else {
+		if err := verifyConfirmedConfigSnapshot(*selected, confirmedSnapshot); err != nil {
+			return nil, err
+		}
 	}
 	dest := config.UserConfigPath()
 	if dest == "" {
 		return nil, fmt.Errorf("global config path is unavailable")
 	}
+	if err := verifyRepairPlanFileState(dest, expectedStates); err != nil {
+		return nil, err
+	}
+	if err := verifyRepairPlanFileState(selected.Path, expectedStates); err != nil {
+		return nil, err
+	}
+	repairMutationBeforeRename(dest)
+	if err := verifyRepairPlanFileState(dest, expectedStates); err != nil {
+		return nil, err
+	}
+	if err := verifyRepairPlanFileState(selected.Path, expectedStates); err != nil {
+		return nil, err
+	}
 	tx := newRepairTransaction(time.Now())
 	backup := filepath.Join(config.MemoryUserDir(), "repair", "restore-backups", tx.ID+".toml")
+	if expectedStates != nil {
+		backup = dest + ".reasonix-restore-" + tx.ID
+	}
 	moved := false
 	if info, err := os.Lstat(dest); err == nil {
 		// Move the live file aside instead of copying its bytes: dest may be a
@@ -129,6 +173,9 @@ func RestoreConfigSnapshot(id string) (*RepairTransaction, error) {
 		}
 		if renameErr := snapshotRename(dest, backup); renameErr == nil {
 			moved = true
+			repairMutationAfterRename(dest)
+		} else if expectedStates != nil {
+			return nil, fmt.Errorf("restore config snapshot: move confirmed config: %w", renameErr)
 		} else if info.Mode()&os.ModeSymlink != 0 {
 			// Cross-device fallback: recreate the link node at the backup path
 			// so undo still restores a symlink, then drop the original.
@@ -153,22 +200,47 @@ func RestoreConfigSnapshot(id string) (*RepairTransaction, error) {
 				return nil, err
 			}
 		}
+		if moved {
+			if expectedStates != nil {
+				if _, err := os.Lstat(dest); err == nil {
+					return nil, fmt.Errorf("repair plan preview changed since confirmation; target was recreated during snapshot restore; confirmed state remains at %s", backup)
+				} else if !os.IsNotExist(err) {
+					return nil, err
+				}
+			}
+			if expected := expectedStates[dest]; expected != "" {
+				if err := verifyRepairPlanStateID(backup, expected); err != nil {
+					return nil, joinRestoreCleanupError(err, backup, restoreRepairNodeIfAbsent(backup, dest))
+				}
+			}
+		}
 		tx.Changes = append(tx.Changes, RepairChange{Scope: "global", TargetPath: dest, PreviousPath: backup})
 	} else if os.IsNotExist(err) {
 		tx.Changes = append(tx.Changes, RepairChange{Scope: "global", TargetPath: dest, RemoveOnUndo: true})
 	} else {
 		return nil, err
 	}
-	b, err := os.ReadFile(selected.Path)
-	if err != nil {
-		if moved {
-			err = joinRestoreCleanupError(err, backup, restoreBackupNode(backup, dest))
+	b := confirmedSnapshot
+	if expectedStates == nil {
+		b, err = os.ReadFile(selected.Path)
+		if err != nil {
+			if moved {
+				err = joinRestoreCleanupError(err, backup, restoreBackupNode(backup, dest))
+			}
+			return nil, err
 		}
-		return nil, err
 	}
-	if err := fileutil.AtomicWriteFile(dest, b, 0o600); err != nil {
+	writeSnapshot := fileutil.AtomicWriteFile
+	if expectedStates != nil {
+		writeSnapshot = fileutil.AtomicCreateFile
+	}
+	if err := writeSnapshot(dest, b, 0o600); err != nil {
 		if moved {
-			err = joinRestoreCleanupError(err, backup, restoreBackupNode(backup, dest))
+			if _, statErr := os.Lstat(dest); os.IsNotExist(statErr) {
+				err = joinRestoreCleanupError(err, backup, restoreBackupNode(backup, dest))
+			} else if saveErr := saveRepairTransaction(tx); saveErr != nil {
+				err = fmt.Errorf("%w; preserve displaced config transaction: %v", err, saveErr)
+			}
 		}
 		return nil, err
 	}
@@ -180,6 +252,17 @@ func RestoreConfigSnapshot(id string) (*RepairTransaction, error) {
 		return nil, joinRestoreCleanupError(err, backup, restoreBackupNode(backup, dest))
 	}
 	return tx, nil
+}
+
+func verifyConfirmedConfigSnapshot(snap ConfigSnapshot, content []byte) error {
+	if err := config.ValidateBytes(content); err != nil {
+		return fmt.Errorf("config snapshot %q is invalid: %w", snap.ID, err)
+	}
+	sum := sha256.Sum256(content)
+	if !strings.EqualFold(hex.EncodeToString(sum[:]), snap.SHA256) {
+		return fmt.Errorf("config snapshot %q hash mismatch", snap.ID)
+	}
+	return nil
 }
 
 // restoreBackupNode puts the backup node back at dest, replacing whatever sits

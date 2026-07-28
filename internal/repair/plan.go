@@ -41,8 +41,15 @@ type RepairPlanPreview struct {
 	// StateID binds non-display inputs without exposing their paths or content.
 	StateID string `json:"stateId,omitempty"`
 
-	rollbackToVersion string
-	rollbackCreatedAt string
+	fileStates    map[string]string
+	afterContent  []byte
+	afterReadable bool
+}
+
+type repairPlanFileSnapshot struct {
+	StateID  string
+	Content  []byte
+	Readable bool
 }
 
 // RepairPlanID identifies the canonical plan content without trusting an ID
@@ -86,7 +93,7 @@ func repairPlanActionPreviewID(action RepairPlanAction, preview RepairPlanPrevie
 	}{action, preview})
 }
 
-func repairPlanFileState(path string) string {
+func repairPlanFileSnapshotAt(path string) repairPlanFileSnapshot {
 	state := struct {
 		Kind       string `json:"kind"`
 		Mode       uint32 `json:"mode,omitempty"`
@@ -98,8 +105,9 @@ func repairPlanFileState(path string) string {
 		if !os.IsNotExist(err) {
 			state.Kind = "unreadable"
 		}
-		return repairPlanStateID(state)
+		return repairPlanFileSnapshot{StateID: repairPlanStateID(state)}
 	}
+	snapshot := repairPlanFileSnapshot{}
 	state.Kind = "other"
 	state.Mode = uint32(info.Mode())
 	if info.Mode()&os.ModeSymlink != 0 {
@@ -111,15 +119,22 @@ func repairPlanFileState(path string) string {
 		state.Kind = "directory"
 	}
 	if b, readErr := os.ReadFile(path); readErr == nil {
-		sum := sha256.Sum256(b)
+		snapshot.Content = b
+		snapshot.Readable = true
+		sum := sha256.Sum256(snapshot.Content)
 		state.Content = hex.EncodeToString(sum[:])
 	} else if state.Kind == "file" || state.Kind == "symlink" {
 		state.Kind += "-unreadable"
 	}
-	return repairPlanStateID(state)
+	snapshot.StateID = repairPlanStateID(state)
+	return snapshot
 }
 
-func repairPlanDerivedStateID(target string) string {
+func repairPlanFileState(path string) string {
+	return repairPlanFileSnapshotAt(path).StateID
+}
+
+func repairPlanDerivedStateSnapshot(target string) (string, map[string]string) {
 	paths := derivedStatePaths()
 	names := []string{target}
 	if target == "all" {
@@ -133,13 +148,17 @@ func repairPlanDerivedStateID(target string) string {
 		Name  string `json:"name"`
 		State string `json:"state"`
 	}, 0, len(names))
+	fileStates := make(map[string]string, len(names))
 	for _, name := range names {
+		path := paths[name]
+		stateID := repairPlanFileState(path)
 		states = append(states, struct {
 			Name  string `json:"name"`
 			State string `json:"state"`
-		}{Name: name, State: repairPlanFileState(paths[name])})
+		}{Name: name, State: stateID})
+		fileStates[path] = stateID
 	}
-	return repairPlanStateID(states)
+	return repairPlanStateID(states), fileStates
 }
 
 type ApplyPlanOptions struct {
@@ -260,19 +279,23 @@ func PreviewRepairPlan(plan RepairPlan, opts ApplyPlanOptions) ([]RepairPlanPrev
 			if action.Scope == "project" {
 				path = projectConfigPath(opts.Root)
 			}
-			before, _ := os.ReadFile(path)
-			after := []byte{}
-			afterState := "none"
+			before := repairPlanFileSnapshotAt(path)
+			after := repairPlanFileSnapshot{StateID: "none"}
 			if action.Scope == "global" {
-				after, _ = os.ReadFile(lastKnownGoodConfigPath())
-				afterState = repairPlanFileState(lastKnownGoodConfigPath())
+				after = repairPlanFileSnapshotAt(lastKnownGoodConfigPath())
 			}
 			preview.Description = "Quarantine invalid " + action.Scope + " configuration"
-			preview.Diff = textdiff.Build(action.Scope+"-config.toml", string(before), string(after), textdiff.Modify).Diff
+			preview.Diff = textdiff.Build(action.Scope+"-config.toml", string(before.Content), string(after.Content), textdiff.Modify).Diff
 			preview.StateID = repairPlanStateID(struct {
 				Before string `json:"before"`
 				After  string `json:"after"`
-			}{repairPlanFileState(path), afterState})
+			}{before.StateID, after.StateID})
+			preview.fileStates = map[string]string{path: before.StateID}
+			if action.Scope == "global" {
+				preview.fileStates[lastKnownGoodConfigPath()] = after.StateID
+			}
+			preview.afterContent = append([]byte(nil), after.Content...)
+			preview.afterReadable = after.Readable
 		case "restore_snapshot":
 			snap, err := configSnapshotByID(action.SnapshotID)
 			if err != nil {
@@ -281,17 +304,23 @@ func PreviewRepairPlan(plan RepairPlan, opts ApplyPlanOptions) ([]RepairPlanPrev
 			if err := verifyConfigSnapshot(snap); err != nil {
 				return nil, err
 			}
-			before, _ := os.ReadFile(config.UserConfigPath())
-			after, _ := os.ReadFile(snap.Path)
+			before := repairPlanFileSnapshotAt(config.UserConfigPath())
+			after := repairPlanFileSnapshotAt(snap.Path)
 			preview.Description = "Restore verified global configuration snapshot " + snap.ID
-			preview.Diff = textdiff.Build("global-config.toml", string(before), string(after), textdiff.Modify).Diff
+			preview.Diff = textdiff.Build("global-config.toml", string(before.Content), string(after.Content), textdiff.Modify).Diff
 			preview.StateID = repairPlanStateID(struct {
 				Current  string `json:"current"`
 				Snapshot string `json:"snapshot"`
-			}{repairPlanFileState(config.UserConfigPath()), repairPlanFileState(snap.Path)})
+			}{before.StateID, after.StateID})
+			preview.fileStates = map[string]string{
+				config.UserConfigPath(): before.StateID,
+				snap.Path:               after.StateID,
+			}
+			preview.afterContent = append([]byte(nil), after.Content...)
+			preview.afterReadable = after.Readable
 		case "rebuild_derived_state":
 			preview.Description = "Quarantine and rebuild derived desktop state: " + action.Target
-			preview.StateID = repairPlanDerivedStateID(action.Target)
+			preview.StateID, preview.fileStates = repairPlanDerivedStateSnapshot(action.Target)
 		case "rollback_update":
 			tx, err := ReadPendingUpdate()
 			if err != nil {
@@ -299,8 +328,6 @@ func PreviewRepairPlan(plan RepairPlan, opts ApplyPlanOptions) ([]RepairPlanPrev
 			}
 			preview.Description = fmt.Sprintf("Restore Reasonix %s over probationary %s", tx.FromVersion, tx.ToVersion)
 			preview.StateID = repairPlanStateID(tx)
-			preview.rollbackToVersion = tx.ToVersion
-			preview.rollbackCreatedAt = tx.CreatedAt
 		}
 		previews = append(previews, preview)
 	}
@@ -319,6 +346,11 @@ func ApplyRepairPlan(plan RepairPlan, opts ApplyPlanOptions) (ApplyPlanResult, e
 			return ApplyPlanResult{Applied: []string{}}, fmt.Errorf("repair plan preview changed since confirmation; re-preview and re-confirm (expected %s, got %s)", expected, actual)
 		}
 	}
+	unlockTransaction, err := lockRepairTransaction()
+	if err != nil {
+		return ApplyPlanResult{Applied: []string{}}, err
+	}
+	defer unlockTransaction()
 	boundPreview := preview
 	result := ApplyPlanResult{Applied: []string{}}
 	// Each action records its own transaction in last-repair.json, so a
@@ -347,58 +379,9 @@ func ApplyRepairPlan(plan RepairPlan, opts ApplyPlanOptions) (ApplyPlanResult, e
 		return persistRepairTransaction(planTx)
 	}
 	for i, action := range plan.Actions {
-		if expected != "" {
-			current, previewErr := PreviewRepairPlan(RepairPlan{
-				SchemaVersion: plan.SchemaVersion,
-				Summary:       plan.Summary,
-				Actions:       []RepairPlanAction{action},
-			}, opts)
-			if previewErr != nil {
-				return result, fmt.Errorf("action %d: repair plan preview changed since confirmation; re-preview and re-confirm: %w", i+1, previewErr)
-			}
-			expectedAction := repairPlanActionPreviewID(action, boundPreview[i])
-			actualAction := repairPlanActionPreviewID(action, current[0])
-			if expectedAction != actualAction {
-				return result, fmt.Errorf("action %d: repair plan preview changed since confirmation; re-preview and re-confirm (expected %s, got %s)", i+1, expectedAction, actualAction)
-			}
-			boundPreview[i] = current[0]
-		}
 		var actionErr error
-		switch action.Type {
-		case "repair_config":
-			report, err := InspectAndRepairConfig(ConfigOptions{Root: opts.Root, Apply: true, IncludeProject: action.Scope == "project", OnlyScope: action.Scope})
-			if err != nil {
-				actionErr = err
-			} else {
-				result.Applied = append(result.Applied, report.Applied...)
-			}
-		case "restore_snapshot":
-			tx, err := RestoreConfigSnapshot(action.SnapshotID)
-			if err != nil {
-				actionErr = err
-			} else {
-				result.Applied = append(result.Applied, "restored config snapshot (undo "+tx.ID+")")
-			}
-		case "rebuild_derived_state":
-			paths, err := RebuildDerivedState(action.Target)
-			if err != nil {
-				actionErr = err
-			} else {
-				result.Applied = append(result.Applied, paths...)
-			}
-		case "rollback_update":
-			rollback, err := RollbackPendingUpdate()
-			if expected != "" {
-				rollback, err = rollbackPendingUpdate(boundPreview[i].rollbackToVersion, boundPreview[i].rollbackCreatedAt)
-			}
-			if err != nil {
-				actionErr = err
-			} else if rollback.RolledBack {
-				result.Applied = append(result.Applied, "rolled back update to "+rollback.ToVersion)
-			} else if expected != "" {
-				actionErr = fmt.Errorf("repair plan preview changed since confirmation; re-preview and re-confirm")
-			}
-		}
+		applied, actionErr := applyRepairPlanAction(plan, action, boundPreview[i], opts, expected != "")
+		result.Applied = append(result.Applied, applied...)
 		// Absorb even on failure: a partially applied action may have recorded
 		// changes that the plan-level undo must cover.
 		if mergeErr := absorbRepair(); mergeErr != nil && actionErr == nil {
@@ -409,6 +392,127 @@ func ApplyRepairPlan(plan RepairPlan, opts ApplyPlanOptions) (ApplyPlanResult, e
 		}
 	}
 	return result, nil
+}
+
+func applyRepairPlanAction(plan RepairPlan, action RepairPlanAction, bound RepairPlanPreview, opts ApplyPlanOptions, enforcePreview bool) ([]string, error) {
+	if action.Type == "rollback_update" {
+		var rollback UpdateRollbackResult
+		var err error
+		if enforcePreview {
+			rollback, err = rollbackPendingUpdateState(bound.StateID)
+		} else {
+			rollback, err = RollbackPendingUpdate()
+		}
+		if err != nil {
+			return nil, err
+		}
+		if !rollback.RolledBack {
+			if enforcePreview {
+				return nil, fmt.Errorf("repair plan preview changed since confirmation; re-preview and re-confirm")
+			}
+			return nil, nil
+		}
+		return []string{"rolled back update to " + rollback.ToVersion}, nil
+	}
+
+	paths, err := repairPlanActionMutationPaths(action, opts)
+	if err != nil {
+		return nil, err
+	}
+	if enforcePreview {
+		paths = paths[:0]
+		for path := range bound.fileStates {
+			paths = append(paths, path)
+		}
+	}
+	unlock, err := lockRepairMutations(paths...)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+
+	if enforcePreview {
+		current, previewErr := PreviewRepairPlan(RepairPlan{
+			SchemaVersion: plan.SchemaVersion,
+			Summary:       plan.Summary,
+			Actions:       []RepairPlanAction{action},
+		}, opts)
+		if previewErr != nil {
+			return nil, fmt.Errorf("repair plan preview changed since confirmation; re-preview and re-confirm: %w", previewErr)
+		}
+		expectedAction := repairPlanActionPreviewID(action, bound)
+		actualAction := repairPlanActionPreviewID(action, current[0])
+		if expectedAction != actualAction {
+			return nil, fmt.Errorf("repair plan preview changed since confirmation; re-preview and re-confirm (expected %s, got %s)", expectedAction, actualAction)
+		}
+	}
+	expectedStates := bound.fileStates
+	confirmedContent := bound.afterContent
+	hasConfirmedContent := bound.afterReadable
+	if !enforcePreview {
+		expectedStates = nil
+		confirmedContent = nil
+		hasConfirmedContent = false
+	}
+
+	switch action.Type {
+	case "repair_config":
+		report, err := inspectAndRepairConfigUnlocked(ConfigOptions{
+			Root:                   opts.Root,
+			Apply:                  true,
+			IncludeProject:         action.Scope == "project",
+			OnlyScope:              action.Scope,
+			expectedStates:         expectedStates,
+			confirmedGlobalRestore: confirmedContent,
+			hasConfirmedRestore:    hasConfirmedContent,
+		})
+		if err != nil {
+			return nil, err
+		}
+		return report.Applied, nil
+	case "restore_snapshot":
+		tx, err := restoreConfigSnapshotBoundUnlocked(action.SnapshotID, expectedStates, confirmedContent)
+		if err != nil {
+			return nil, err
+		}
+		return []string{"restored config snapshot (undo " + tx.ID + ")"}, nil
+	case "rebuild_derived_state":
+		return rebuildDerivedStateBoundUnlocked(action.Target, expectedStates)
+	default:
+		return nil, fmt.Errorf("unsupported repair action %q", action.Type)
+	}
+}
+
+func repairPlanActionMutationPaths(action RepairPlanAction, opts ApplyPlanOptions) ([]string, error) {
+	switch action.Type {
+	case "repair_config":
+		return configRepairTargetPaths(ConfigOptions{Root: opts.Root, IncludeProject: action.Scope == "project", OnlyScope: action.Scope})
+	case "restore_snapshot":
+		return []string{config.UserConfigPath()}, nil
+	case "rebuild_derived_state":
+		return derivedStateTargetPaths(action.Target)
+	default:
+		return nil, nil
+	}
+}
+
+func verifyRepairPlanFileState(path string, expectedStates map[string]string) error {
+	if len(expectedStates) == 0 {
+		return nil
+	}
+	expected, ok := expectedStates[path]
+	if !ok {
+		return fmt.Errorf("repair plan preview did not bind target state; re-preview and re-confirm")
+	}
+	return verifyRepairPlanStateID(path, expected)
+}
+
+func verifyRepairPlanStateID(path, expected string) error {
+	actual := repairPlanFileState(path)
+	if expected != actual {
+		return fmt.Errorf("repair plan preview changed since confirmation; re-preview and re-confirm (expected %s, got %s)", expected, actual)
+	}
+	return nil
 }
 
 func configSnapshotByID(id string) (ConfigSnapshot, error) {

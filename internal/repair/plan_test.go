@@ -1,9 +1,11 @@
 package repair
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -150,6 +152,442 @@ func TestApplyRepairPlanBindsPendingUpdateTransactionIdentity(t *testing.T) {
 	}
 	if got, err := os.ReadFile(target); err != nil || string(got) != "new" {
 		t.Fatalf("stale rollback touched target: %q, %v", got, err)
+	}
+}
+
+func TestApplyRepairPlanRollsBackCurrentConfirmedUpdateOnce(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("REASONIX_HOME", home)
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "reasonix-desktop")
+	originalExecutable := repairExecutable
+	repairExecutable = func() (string, error) { return filepath.Join(dir, "reasonix-guard"), nil }
+	t.Cleanup(func() { repairExecutable = originalExecutable })
+	if err := os.WriteFile(target, []byte("old"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := PrepareFileUpdate("v1", "v2", target); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte("new"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	plan := RepairPlan{SchemaVersion: 1, Summary: "rollback", Actions: []RepairPlanAction{{Type: "rollback_update", Reason: "failed update"}}}
+	preview, err := PreviewRepairPlan(plan, ApplyPlanOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := ApplyRepairPlan(plan, ApplyPlanOptions{ExpectedPreviewID: RepairPlanPreviewID(plan, preview)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Applied) != 1 || result.Applied[0] != "rolled back update to v1" {
+		t.Fatalf("applied = %v, want one successful rollback", result.Applied)
+	}
+	if got, err := os.ReadFile(target); err != nil || string(got) != "old" {
+		t.Fatalf("target after rollback = %q, %v", got, err)
+	}
+	if _, err := os.Stat(PendingUpdatePath()); !os.IsNotExist(err) {
+		t.Fatalf("pending update survived successful rollback: %v", err)
+	}
+}
+
+func TestRollbackPendingUpdateStateBindsCompleteTransaction(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("REASONIX_HOME", home)
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "reasonix-desktop")
+	originalExecutable := repairExecutable
+	repairExecutable = func() (string, error) { return filepath.Join(dir, "reasonix-guard"), nil }
+	t.Cleanup(func() { repairExecutable = originalExecutable })
+	if err := os.WriteFile(target, []byte("old"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := PrepareFileUpdate("v1", "v2", target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte("new"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	expectedState := repairPlanStateID(tx)
+	tx.FromVersion = "different-old-version"
+	if err := WritePendingUpdate(tx); err != nil {
+		t.Fatal(err)
+	}
+	result, err := rollbackPendingUpdateState(expectedState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RolledBack {
+		t.Fatalf("changed transaction was rolled back: %+v", result)
+	}
+	if got, err := os.ReadFile(target); err != nil || string(got) != "new" {
+		t.Fatalf("changed transaction touched target: %q, %v", got, err)
+	}
+	if _, err := ReadPendingUpdate(); err != nil {
+		t.Fatalf("changed transaction was consumed: %v", err)
+	}
+}
+
+func TestApplyRepairPlanRejectsUncooperativeWriteBeforeRename(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("REASONIX_HOME", home)
+	tabs := filepath.Join(home, "desktop-tabs.json")
+	if err := os.WriteFile(tabs, []byte("confirmed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	plan := RepairPlan{SchemaVersion: 1, Summary: "tabs", Actions: []RepairPlanAction{{Type: "rebuild_derived_state", Target: "tabs", Reason: "malformed"}}}
+	preview, err := PreviewRepairPlan(plan, ApplyPlanOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalHook := repairMutationBeforeRename
+	repairMutationBeforeRename = func(path string) {
+		if path == tabs {
+			if err := os.WriteFile(path, []byte("changed-in-window"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	t.Cleanup(func() { repairMutationBeforeRename = originalHook })
+	result, err := ApplyRepairPlan(plan, ApplyPlanOptions{ExpectedPreviewID: RepairPlanPreviewID(plan, preview)})
+	if err == nil || !strings.Contains(err.Error(), "preview changed since confirmation") {
+		t.Fatalf("error = %v, want final state refusal", err)
+	}
+	if len(result.Applied) != 0 {
+		t.Fatalf("applied = %v, want no writes", result.Applied)
+	}
+	if got, err := os.ReadFile(tabs); err != nil || string(got) != "changed-in-window" {
+		t.Fatalf("unconfirmed write was quarantined: %q, %v", got, err)
+	}
+}
+
+func TestApplyRepairPlanPreservesUncooperativeWriteAfterRename(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("REASONIX_HOME", home)
+	tabs := filepath.Join(home, "desktop-tabs.json")
+	if err := os.WriteFile(tabs, []byte("confirmed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	plan := RepairPlan{SchemaVersion: 1, Summary: "tabs", Actions: []RepairPlanAction{{Type: "rebuild_derived_state", Target: "tabs", Reason: "malformed"}}}
+	preview, err := PreviewRepairPlan(plan, ApplyPlanOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalHook := repairMutationAfterRename
+	repairMutationAfterRename = func(path string) {
+		if path == tabs {
+			if err := os.WriteFile(path, []byte("new-after-rename"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	t.Cleanup(func() { repairMutationAfterRename = originalHook })
+	result, err := ApplyRepairPlan(plan, ApplyPlanOptions{ExpectedPreviewID: RepairPlanPreviewID(plan, preview)})
+	if err == nil {
+		t.Fatal("uncooperative post-rename write was accepted")
+	}
+	if len(result.Applied) != 0 {
+		t.Fatalf("applied = %v, want no successful action", result.Applied)
+	}
+	if got, err := os.ReadFile(tabs); err != nil || string(got) != "new-after-rename" {
+		t.Fatalf("post-rename writer was overwritten: %q, %v", got, err)
+	}
+	quarantines, err := filepath.Glob(tabs + ".reasonix-rebuild-*")
+	if err != nil || len(quarantines) != 1 {
+		t.Fatalf("confirmed state backup = %v, %v", quarantines, err)
+	}
+	if got, err := os.ReadFile(quarantines[0]); err != nil || string(got) != "confirmed" {
+		t.Fatalf("confirmed state backup = %q, %v", got, err)
+	}
+}
+
+func TestRepairMutationLockRechecksAfterWaiting(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("REASONIX_HOME", home)
+	tabs := filepath.Join(home, "desktop-tabs.json")
+	if err := os.WriteFile(tabs, []byte("confirmed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	plan := RepairPlan{SchemaVersion: 1, Summary: "tabs", Actions: []RepairPlanAction{{Type: "rebuild_derived_state", Target: "tabs", Reason: "malformed"}}}
+	preview, err := PreviewRepairPlan(plan, ApplyPlanOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	holder, err := lockRepairMutations(tabs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reachedLock := make(chan struct{})
+	originalHook := repairMutationBeforeLock
+	repairMutationBeforeLock = func(paths []string) {
+		if len(paths) == 1 && paths[0] == tabs {
+			select {
+			case <-reachedLock:
+			default:
+				close(reachedLock)
+			}
+		}
+	}
+	t.Cleanup(func() { repairMutationBeforeLock = originalHook })
+
+	resultCh := make(chan struct {
+		result ApplyPlanResult
+		err    error
+	}, 1)
+	applyPreviewID := RepairPlanPreviewID(plan, preview)
+	go func() {
+		result, err := ApplyRepairPlan(plan, ApplyPlanOptions{ExpectedPreviewID: applyPreviewID})
+		resultCh <- struct {
+			result ApplyPlanResult
+			err    error
+		}{result, err}
+	}()
+	<-reachedLock
+	if err := os.WriteFile(tabs, []byte("changed-while-waiting"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	holder()
+	got := <-resultCh
+	if got.err == nil || !strings.Contains(got.err.Error(), "preview changed since confirmation") {
+		t.Fatalf("error = %v, want post-lock state refusal", got.err)
+	}
+	if len(got.result.Applied) != 0 {
+		t.Fatalf("applied = %v, want no writes", got.result.Applied)
+	}
+	if data, err := os.ReadFile(tabs); err != nil || string(data) != "changed-while-waiting" {
+		t.Fatalf("post-preview state was touched: %q, %v", data, err)
+	}
+}
+
+func TestRepairTransactionLockSerializesDisjointTargets(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("REASONIX_HOME", home)
+	tabs := filepath.Join(home, "desktop-tabs.json")
+	projects := filepath.Join(home, "desktop-projects.json")
+	if err := os.WriteFile(tabs, []byte("tabs"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(projects, []byte("projects"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	plan := RepairPlan{SchemaVersion: 1, Summary: "tabs", Actions: []RepairPlanAction{{Type: "rebuild_derived_state", Target: "tabs", Reason: "malformed"}}}
+	preview, err := PreviewRepairPlan(plan, ApplyPlanOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tabsPath, err := filepath.Abs(tabs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transactionPath, err := filepath.Abs(repairTransactionPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstHolding := atomic.Bool{}
+	tabsReached := make(chan struct{})
+	releaseTabs := make(chan struct{})
+	secondAttempted := make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-releaseTabs:
+		default:
+			close(releaseTabs)
+		}
+	})
+	originalHook := repairMutationBeforeLock
+	repairMutationBeforeLock = func(paths []string) {
+		if len(paths) != 1 {
+			return
+		}
+		switch paths[0] {
+		case tabsPath:
+			firstHolding.Store(true)
+			close(tabsReached)
+			<-releaseTabs
+		case transactionPath:
+			if firstHolding.Load() {
+				select {
+				case <-secondAttempted:
+				default:
+					close(secondAttempted)
+				}
+			}
+		}
+	}
+	t.Cleanup(func() { repairMutationBeforeLock = originalHook })
+
+	firstResult := make(chan error, 1)
+	go func() {
+		_, err := ApplyRepairPlan(plan, ApplyPlanOptions{ExpectedPreviewID: RepairPlanPreviewID(plan, preview)})
+		firstResult <- err
+	}()
+	<-tabsReached
+	secondResult := make(chan error, 1)
+	go func() {
+		_, err := RebuildDerivedState("projects")
+		secondResult <- err
+	}()
+	<-secondAttempted
+	select {
+	case err := <-secondResult:
+		t.Fatalf("disjoint repair bypassed transaction lock: %v", err)
+	default:
+	}
+	if got, err := os.ReadFile(projects); err != nil || string(got) != "projects" {
+		t.Fatalf("waiting repair changed project state: %q, %v", got, err)
+	}
+
+	close(releaseTabs)
+	if err := <-firstResult; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-secondResult; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(projects); !os.IsNotExist(err) {
+		t.Fatalf("serialized repair did not run: %v", err)
+	}
+}
+
+func TestRepairPlanPreviewDiffMatchesBoundState(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("REASONIX_HOME", home)
+	global := filepath.Join(home, "config.toml")
+	if err := os.WriteFile(global, []byte("[broken\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	plan := RepairPlan{SchemaVersion: 1, Summary: "config", Actions: []RepairPlanAction{{Type: "repair_config", Scope: "global", Reason: "invalid"}}}
+	preview, err := PreviewRepairPlan(plan, ApplyPlanOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(preview[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(preview[0].Diff, "[broken") || !strings.Contains(string(encoded), preview[0].StateID) {
+		t.Fatalf("preview diff/state are not derived from one snapshot: %+v", preview[0])
+	}
+	if got := repairPlanFileSnapshotAt(global); got.StateID != preview[0].fileStates[global] || string(got.Content) != "[broken\n" {
+		t.Fatalf("bound state = %+v, current = %+v", preview[0].fileStates, got)
+	}
+}
+
+func TestApplyRepairPlanRestoresCurrentConfirmedSnapshot(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("REASONIX_HOME", home)
+	global := filepath.Join(home, "config.toml")
+	if err := os.WriteFile(global, []byte("default_model = \"known-good\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := RecordHealthyConfig("v1"); err != nil {
+		t.Fatal(err)
+	}
+	snapshots, err := ListConfigSnapshots()
+	if err != nil || len(snapshots) != 1 {
+		t.Fatalf("snapshots = %+v, err = %v", snapshots, err)
+	}
+	current := []byte("default_model = \"current\"\n")
+	if err := os.WriteFile(global, current, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	plan := RepairPlan{SchemaVersion: 1, Summary: "snapshot", Actions: []RepairPlanAction{{Type: "restore_snapshot", SnapshotID: snapshots[0].ID, Reason: "known good"}}}
+	preview, err := PreviewRepairPlan(plan, ApplyPlanOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := ApplyRepairPlan(plan, ApplyPlanOptions{ExpectedPreviewID: RepairPlanPreviewID(plan, preview)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Applied) != 1 || !strings.Contains(result.Applied[0], "restored config snapshot") {
+		t.Fatalf("applied = %v", result.Applied)
+	}
+	if got, err := os.ReadFile(global); err != nil || string(got) != "default_model = \"known-good\"\n" {
+		t.Fatalf("restored config = %q, %v", got, err)
+	}
+	if _, err := UndoLastRepair(); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(global); err != nil || string(got) != string(current) {
+		t.Fatalf("undo restored = %q, %v", got, err)
+	}
+}
+
+func TestApplyRepairPlanReportsConfirmedLastKnownGoodRestoreFailure(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("REASONIX_HOME", home)
+	global := filepath.Join(home, "config.toml")
+	if err := os.WriteFile(global, []byte("[broken\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	lastKnownGood := lastKnownGoodConfigPath()
+	if err := os.MkdirAll(filepath.Dir(lastKnownGood), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(lastKnownGood, []byte("[also-broken\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	plan := RepairPlan{SchemaVersion: 1, Summary: "config", Actions: []RepairPlanAction{{Type: "repair_config", Scope: "global", Reason: "invalid"}}}
+	preview, err := PreviewRepairPlan(plan, ApplyPlanOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := ApplyRepairPlan(plan, ApplyPlanOptions{ExpectedPreviewID: RepairPlanPreviewID(plan, preview)})
+	if err == nil || !strings.Contains(err.Error(), "restore confirmed last-known-good config") {
+		t.Fatalf("error = %v, want confirmed restore failure", err)
+	}
+	if len(result.Applied) != 0 {
+		t.Fatalf("applied = %v, want failed action omitted", result.Applied)
+	}
+	if _, statErr := os.Stat(global); !os.IsNotExist(statErr) {
+		t.Fatalf("global config unexpectedly restored: %v", statErr)
+	}
+	if _, err := UndoLastRepair(); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(global); err != nil || string(got) != "[broken\n" {
+		t.Fatalf("undo restored = %q, %v", got, err)
+	}
+}
+
+func TestApplyRepairPlanDoesNotRestoreUnreadableLastKnownGoodNode(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("REASONIX_HOME", home)
+	global := filepath.Join(home, "config.toml")
+	if err := os.WriteFile(global, []byte("[broken\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	lastKnownGood := lastKnownGoodConfigPath()
+	if err := os.MkdirAll(lastKnownGood, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	plan := RepairPlan{SchemaVersion: 1, Summary: "config", Actions: []RepairPlanAction{{Type: "repair_config", Scope: "global", Reason: "invalid"}}}
+	preview, err := PreviewRepairPlan(plan, ApplyPlanOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := ApplyRepairPlan(plan, ApplyPlanOptions{ExpectedPreviewID: RepairPlanPreviewID(plan, preview)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Applied) != 1 || !strings.Contains(result.Applied[0], "quarantined global config") {
+		t.Fatalf("applied = %v, want quarantine without restore", result.Applied)
+	}
+	if _, err := os.Stat(global); !os.IsNotExist(err) {
+		t.Fatalf("unreadable source created a global config: %v", err)
 	}
 }
 
