@@ -687,6 +687,57 @@ func TestConfigReasoningLanguageRejectsAliases(t *testing.T) {
 	}
 }
 
+func TestConfigCurrencyCommandWritesUserConfig(t *testing.T) {
+	isolateCLIConfigHome(t)
+
+	out := captureStdout(t, func() {
+		if rc := Run([]string{"config", "currency", "CNY"}, "test-version"); rc != 0 {
+			t.Fatalf("config currency rc = %d, want 0", rc)
+		}
+	})
+	if !strings.Contains(out, `currency = "CNY"`) || !strings.Contains(out, "resolved: CNY") {
+		t.Fatalf("config currency output = %q", out)
+	}
+	cfg := config.LoadForEdit(config.UserConfigPath())
+	if got := cfg.DesktopCurrency(); got != "CNY" {
+		t.Fatalf("saved currency = %q, want CNY", got)
+	}
+}
+
+func TestConfigCurrencyAutoUsesResolvedCLILocale(t *testing.T) {
+	isolateCLIConfigHome(t)
+	i18n.DetectLanguage("zh-TW")
+	t.Cleanup(func() { i18n.DetectLanguage("en") })
+
+	out := captureStdout(t, func() {
+		if rc := configCurrencyCommand([]string{"auto"}); rc != 0 {
+			t.Fatalf("config currency auto rc = %d, want 0", rc)
+		}
+	})
+	if !strings.Contains(out, `currency = "auto"`) || !strings.Contains(out, "resolved: CNY") {
+		t.Fatalf("config currency auto output = %q", out)
+	}
+	cfg := config.LoadForEdit(config.UserConfigPath())
+	if got := cfg.DesktopCurrency(); got != "" {
+		t.Fatalf("auto should clear saved currency, got %q", got)
+	}
+}
+
+func TestConfigCurrencyRejectsProjectScope(t *testing.T) {
+	isolateCLIConfigHome(t)
+	errOut := captureStderr(t, func() {
+		if rc := Run([]string{"config", "currency", "--local", "USD"}, "test-version"); rc != 2 {
+			t.Fatalf("config currency --local rc = %d, want 2", rc)
+		}
+	})
+	if !strings.Contains(errOut, "user-level only") {
+		t.Fatalf("config currency --local stderr = %q", errOut)
+	}
+	if _, err := os.Stat("reasonix.toml"); !os.IsNotExist(err) {
+		t.Fatalf("config currency --local wrote project config, stat err=%v", err)
+	}
+}
+
 func TestProvidersWithMissingKeysOnlyChecksActiveDefaultModel(t *testing.T) {
 	cfg := config.Default()
 	t.Setenv("DEEPSEEK_API_KEY", "")

@@ -54,6 +54,45 @@ func TestAgentKeepPolicyFromConfig(t *testing.T) {
 	}
 }
 
+func TestApplyRuntimeAutoPricingCurrency(t *testing.T) {
+	tests := []struct {
+		name            string
+		runtimeCurrency string
+		desktopCurrency string
+		desktopLanguage string
+		language        string
+		wantCurrency    string
+		wantOutput      float64
+	}{
+		{name: "auto Chinese locale", runtimeCurrency: "CNY", wantCurrency: "¥", wantOutput: 2},
+		{name: "auto English locale", runtimeCurrency: "USD", wantCurrency: "$", wantOutput: 0.28},
+		{name: "explicit USD wins", runtimeCurrency: "CNY", desktopCurrency: "USD", wantCurrency: "$", wantOutput: 0.28},
+		{name: "explicit CNY wins", runtimeCurrency: "USD", desktopCurrency: "CNY", wantCurrency: "¥", wantOutput: 2},
+		{name: "desktop language wins", runtimeCurrency: "USD", desktopLanguage: "zh", wantCurrency: "¥", wantOutput: 2},
+		{name: "CLI language wins", runtimeCurrency: "USD", language: "zh", wantCurrency: "¥", wantOutput: 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.Default()
+			cfg.Desktop.Currency = tt.desktopCurrency
+			cfg.Desktop.Language = tt.desktopLanguage
+			cfg.Language = tt.language
+			cfg.ApplyDeepSeekOfficialDefaultPricing()
+
+			applyRuntimeAutoPricingCurrency(cfg, tt.runtimeCurrency)
+
+			deepseek, ok := cfg.Provider("deepseek-flash")
+			if !ok {
+				t.Fatal("default DeepSeek provider is missing")
+			}
+			price := deepseek.PriceForModel("deepseek-v4-flash")
+			if price == nil || price.Currency != tt.wantCurrency || price.Output != tt.wantOutput {
+				t.Fatalf("flash price = %#v, want currency %q output %v", price, tt.wantCurrency, tt.wantOutput)
+			}
+		})
+	}
+}
+
 // TestBuildFoldsProjectMemoryIntoSystemPrompt is the end-to-end proof of the
 // cache-first wiring: a project REASONIX.md is discovered at boot and folded
 // into the session's system message (the cached prefix), and the `remember`

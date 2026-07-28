@@ -134,23 +134,27 @@ func (c *Config) UpsertProvider(e ProviderEntry) error {
 }
 
 // UpsertProviderPreservingRuntime applies persisted provider fields while
-// retaining credentials and capability state resolved by the latest config
-// load. It is used when replaying an optimistic edit log onto fresh state.
+// retaining process-only state derived by the latest config load. It is used
+// when replaying an optimistic edit log onto fresh state.
 func (c *Config) UpsertProviderPreservingRuntime(e ProviderEntry) error {
-	if current, ok := c.Provider(e.Name); ok && strings.TrimSpace(current.APIKeyEnv) == strings.TrimSpace(e.APIKeyEnv) {
-		e.resolvedAPIKey = current.resolvedAPIKey
-		e.resolvedSource = current.resolvedSource
-		e.visionOverride = current.visionOverride
+	if current, ok := c.Provider(e.Name); ok {
+		e.persistedOfficialCurrency = current.persistedOfficialCurrency
+		if strings.TrimSpace(current.APIKeyEnv) == strings.TrimSpace(e.APIKeyEnv) {
+			e.resolvedAPIKey = current.resolvedAPIKey
+			e.resolvedSource = current.resolvedSource
+			e.visionOverride = current.visionOverride
+		}
 	}
 	return c.UpsertProvider(e)
 }
 
 // ProviderEntryConfigSnapshot strips process-only state from a provider copy so
-// optimistic edit logs never retain resolved credential values.
+// optimistic edit logs contain only persisted configuration.
 func ProviderEntryConfigSnapshot(entry ProviderEntry) ProviderEntry {
 	entry.resolvedAPIKey = ""
 	entry.resolvedSource = CredentialSource{}
 	entry.visionOverride = nil
+	entry.persistedOfficialCurrency = ""
 	return entry
 }
 
@@ -218,6 +222,27 @@ func (c *Config) SetDesktopLanguage(lang string) error {
 		return fmt.Errorf("desktop language %q: must be auto|en|zh", lang)
 	}
 	c.ApplyDeepSeekOfficialDefaultPricing()
+	return nil
+}
+
+// SetDesktopCurrency pins the user-global official pricing region independently
+// from language. The name is retained for persisted-schema compatibility.
+// Empty/auto follows the language preference.
+func (c *Config) SetDesktopCurrency(currency string) error {
+	overridePersisted := false
+	switch strings.ToUpper(strings.TrimSpace(currency)) {
+	case "", "AUTO":
+		c.Desktop.Currency = ""
+	case "CNY", "RMB", "CNH":
+		c.Desktop.Currency = "CNY"
+		overridePersisted = true
+	case "USD":
+		c.Desktop.Currency = "USD"
+		overridePersisted = true
+	default:
+		return fmt.Errorf("desktop currency %q: must be auto|CNY|USD", currency)
+	}
+	applyDeepSeekOfficialDefaultPricingWithOverride(c, overridePersisted)
 	return nil
 }
 

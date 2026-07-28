@@ -1175,18 +1175,58 @@ func (m *Manager) SetActiveSession(parentSession string) {
 	m.mu.Unlock()
 }
 
+// validateTrustedSessionPath performs defense-in-depth syntax validation on a
+// transcript path already trusted by the store/controller layer. It rejects
+// control characters, but deliberately preserves separators and `..`: those are
+// valid host-path syntax, and rejecting them without a trusted root would break
+// legitimate relative paths without establishing filesystem containment.
+func validateTrustedSessionPath(sessionPath string) error {
+	if sessionPath == "" {
+		return fmt.Errorf("jobs: sessionPath must not be empty")
+	}
+	for i, r := range sessionPath {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("jobs: sessionPath contains control character 0x%02x at index %d", r, i)
+		}
+	}
+	return nil
+}
+
 // SetActiveSessionPath binds a parent session id to its persistent transcript
 // path, migrates any temporary artifacts, and loads completed job tombstones from
-// the session sidecar.
+// the session sidecar. sessionPath must come from the trusted store/controller
+// path; this method does not establish filesystem containment on its own.
 func (m *Manager) SetActiveSessionPath(parentSession, sessionPath string) {
 	parentSession = strings.TrimSpace(parentSession)
 	sessionPath = strings.TrimSpace(sessionPath)
-	m.mu.Lock()
-	m.active = parentSession
+	// Preserve the legacy active-only behavior for calls without a complete
+	// binding. In particular, an empty path is not an error or filesystem input.
 	if parentSession == "" || sessionPath == "" {
+		m.mu.Lock()
+		m.active = parentSession
 		m.mu.Unlock()
 		return
 	}
+	// Reject malformed trusted paths before any filesystem side effect. This is
+	// syntax hardening, not a boundary for arbitrary caller-controlled paths.
+	if err := validateTrustedSessionPath(sessionPath); err != nil {
+		m.mu.Lock()
+		m.active = parentSession
+		// A rejected rebinding must not leave future jobs writing to a stale
+		// transcript that happened to use the same parent session id.
+		delete(m.artifactDirs, parentSession)
+		delete(m.loaded, parentSession)
+		m.mu.Unlock()
+		m.sink.Emit(event.Event{
+			Kind:   event.Notice,
+			Level:  event.LevelWarn,
+			Text:   "Ignoring SetActiveSessionPath with invalid session path",
+			Detail: fmt.Sprintf("session %q: %v", parentSession, err),
+		})
+		return
+	}
+	m.mu.Lock()
+	m.active = parentSession
 	oldDir := m.artifactDirLocked(parentSession)
 	adoptDefault := false
 	if _, hasDir := m.artifactDirs[parentSession]; !hasDir && m.hasUnscopedJobsLocked() {

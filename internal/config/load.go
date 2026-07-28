@@ -74,6 +74,8 @@ func loadForRoot(root string, migrateOnDisk bool) (*Config, error) {
 	userDefaultModel := cfg.DefaultModel
 	globalSecrets := cfg.Secrets
 	globalRemote := cfg.Remote.Clone()
+	globalDesktopLanguage := cfg.Desktop.Language
+	globalPricingCurrency := cfg.Desktop.Currency
 	globalTelemetry := cfg.Telemetry
 
 	tomlSources = append(tomlSources, projectTOML)
@@ -88,6 +90,10 @@ func loadForRoot(root string, migrateOnDisk bool) (*Config, error) {
 	// must not be able to inject hosts, jump chains, or port forwards that
 	// steer where Reasonix opens connections.
 	cfg.Remote = globalRemote
+	// Desktop language and pricing currency are user-level regional preferences.
+	// A repository must not be able to alter how the user's spend is shown.
+	cfg.Desktop.Language = globalDesktopLanguage
+	cfg.Desktop.Currency = globalPricingCurrency
 	// CLI telemetry is an explicit user-global privacy choice. Project config
 	// cannot opt a user in or out, including when the global value is absent.
 	cfg.Telemetry = globalTelemetry
@@ -305,7 +311,12 @@ func backfillDeepSeekPro(c *Config) {
 	for _, bp := range Default().Providers {
 		if bp.Name == "deepseek-pro" {
 			bp.APIKeyEnv = flash.APIKeyEnv
-			bp.Price = deepSeekV4PriceForModel(c.DeepSeekOfficialPricingLanguage(), proModel)
+			currency := c.DeepSeekOfficialPricingCurrency()
+			if c.DesktopCurrency() == "" && flash.persistedOfficialCurrency != "" {
+				currency = flash.persistedOfficialCurrency
+				bp.persistedOfficialCurrency = currency
+			}
+			bp.Price = deepSeekV4PriceForModel(currency, proModel)
 			c.Providers = append(c.Providers, bp)
 			return
 		}
@@ -316,12 +327,16 @@ func backfillDeepSeekOfficialPrices(c *Config) {
 	if c == nil {
 		return
 	}
-	defaults := deepSeekV4PricesForConfig(c)
 	for i := range c.Providers {
 		p := &c.Providers[i]
 		if officialProviderKind(p) != "deepseek" {
 			continue
 		}
+		currency := c.DeepSeekOfficialPricingCurrency()
+		if c.DesktopCurrency() == "" && p.persistedOfficialCurrency != "" {
+			currency = p.persistedOfficialCurrency
+		}
+		defaults := DeepSeekV4PricesForCurrency(currency)
 		if p.Price != nil {
 			continue
 		}
@@ -418,6 +433,7 @@ func mergeTOMLProviders(paths []string) ([]ProviderEntry, map[string]providerSou
 		if _, err := decodeTOMLFile(path, &f); err != nil {
 			return nil, nil, nil, false, fmt.Errorf("config %s: %w", path, err)
 		}
+		markPersistedDeepSeekOfficialPricing(&f)
 		if len(f.Providers) == 0 {
 			continue
 		}
@@ -474,6 +490,12 @@ func mergeTOMLProviderAccess(paths []string) ([]string, bool, error) {
 		}
 		if !meta.IsDefined("desktop", "provider_access") {
 			continue
+		}
+		if !saw {
+			// Preserve declaration state even when the list is explicitly empty.
+			// A nil slice means legacy/undeclared access; a non-nil empty slice
+			// means the user intentionally removed every desktop provider.
+			merged = []string{}
 		}
 		saw = true
 		for _, name := range f.Desktop.ProviderAccess {
@@ -672,8 +694,23 @@ func mergeFile(cfg *Config, path string) error {
 	if _, err := os.Stat(path); err != nil {
 		return nil
 	}
-	if _, err := decodeTOMLFile(path, cfg); err != nil {
+	meta, err := decodeTOMLFile(path, cfg)
+	if err != nil {
 		return fmt.Errorf("config %s: %w", path, err)
+	}
+	if meta.IsDefined("providers") {
+		var persisted Config
+		if _, err := decodeTOMLFile(path, &persisted); err != nil {
+			return fmt.Errorf("config %s: %w", path, err)
+		}
+		markPersistedDeepSeekOfficialPricing(&persisted)
+		markers := map[string]string{}
+		for i := range persisted.Providers {
+			markers[providerMergeKey(persisted.Providers[i])] = persisted.Providers[i].persistedOfficialCurrency
+		}
+		for i := range cfg.Providers {
+			cfg.Providers[i].persistedOfficialCurrency = markers[providerMergeKey(cfg.Providers[i])]
+		}
 	}
 	return nil
 }
@@ -1694,7 +1731,12 @@ func ensureDeepSeekOfficialProvider(c *Config) {
 	}
 	if old, ok := c.Provider("deepseek-flash"); ok {
 		entry = officialProviderFromLegacy(entry, old)
-		entry.Prices = deepSeekV4PricesForConfig(c)
+		currency := c.DeepSeekOfficialPricingCurrency()
+		if c.DesktopCurrency() == "" && old.persistedOfficialCurrency != "" {
+			currency = old.persistedOfficialCurrency
+			entry.persistedOfficialCurrency = currency
+		}
+		entry.Prices = DeepSeekV4PricesForCurrency(currency)
 		entry.Models = mergeModelLists([]string{"deepseek-v4-flash", "deepseek-v4-pro"}, old.ModelList())
 		entry.Default = firstKnownModel(entry.Default, entry.Models, "deepseek-v4-flash")
 	}
@@ -1740,6 +1782,7 @@ func officialProviderFromLegacy(entry ProviderEntry, old *ProviderEntry) Provide
 	entry.SupportedEfforts = append([]string(nil), old.SupportedEfforts...)
 	entry.DefaultEffort = old.DefaultEffort
 	entry.NoProxy = old.NoProxy
+	entry.persistedOfficialCurrency = old.persistedOfficialCurrency
 	return entry
 }
 

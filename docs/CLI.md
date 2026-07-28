@@ -69,6 +69,28 @@ different keys. Providers added or removed through setup are also added to or
 removed from desktop provider access, so the same models are available in the
 desktop app.
 
+### Configure regional pricing currency
+
+Use the user-global currency command to inspect or select the official DeepSeek
+regional price table:
+
+```sh
+reasonix config currency             # show the saved and resolved currency
+reasonix config currency auto        # follow the resolved locale
+reasonix config currency CNY
+reasonix config currency USD
+```
+
+`auto` resolves Simplified or Traditional Chinese locales to CNY and English or
+other locales to USD. An explicit `CNY` or `USD` selection remains independent
+from the UI language. This preference is stored in the user config and cannot
+be overridden by project `reasonix.toml`; `--local` is therefore not supported.
+Custom provider prices are preserved.
+
+In an interactive session, `/currency` shows the saved and resolved values, and
+`/currency auto|CNY|USD` changes the preference and refreshes the current
+runtime without discarding the conversation.
+
 ## One-shot and automation
 
 Use `-p` / `--print` when a script needs only the final answer:
@@ -110,6 +132,8 @@ The final structured object has this shape:
   "num_turns": 1,
   "result": "...",
   "session_id": "...",
+  "total_cost": 0,
+  "currency": "USD",
   "total_cost_usd": 0,
   "usage": {
     "input_tokens": 0,
@@ -119,6 +143,13 @@ The final structured object has this shape:
   }
 }
 ```
+
+`total_cost` is denominated in the ISO currency code from `currency`, currently
+`CNY` or `USD` for official DeepSeek pricing. `total_cost_usd` remains as a
+numeric compatibility alias and mirrors `total_cost`; despite its legacy name,
+it is not converted to USD when `currency` is `CNY`. New consumers must use
+`total_cost` together with `currency`. A structured run fails instead of
+reporting a misleading total if usage contains mixed currencies.
 
 Execution failures use `subtype: "error_during_execution"` and
 `is_error: true`. Structured modes keep runtime errors in JSON instead of also
@@ -310,6 +341,7 @@ the displayed list matches the commands the TUI accepts.
 | `/status` | Show model, effort, cache, Git, background jobs, and profile or balance details. |
 | `/work-mode [economy\|balanced\|delivery]` | View or change the runtime profile; `/profile` is an alias. |
 | `/theme [auto\|light\|dark\|style]` | View or change the CLI background mode and accent palette. |
+| `/currency [auto\|CNY\|USD]` | View or change the user-global official pricing currency and refresh the runtime. |
 | `/paste-image` | Read a clipboard image and insert an editable attachment token. |
 | `/mouse` | Toggle in-app mouse selection, scrollbar, and wheel handling. |
 | `/effort` | View or change reasoning effort. |

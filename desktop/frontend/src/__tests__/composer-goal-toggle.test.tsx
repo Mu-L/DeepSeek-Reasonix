@@ -1375,6 +1375,119 @@ console.log("\ncomposer goal toggle");
 
 {
   const dom = installDom();
+  mockApp({
+    Commands: async () => [
+      { name: "writing-plans", description: "Write a plan", kind: "skill", color: "amber" },
+      { name: "review", description: "Review the result", kind: "skill" },
+      { name: "mcp", description: "Manage MCP servers", kind: "builtin", group: "integrations" },
+    ],
+    ListDirForTab: async () => [],
+    SearchFileRefsForTab: async () => [],
+  });
+  const { root, calls, rerender } = await renderComposer();
+
+  const initialText = "请用/writing-plans检查";
+  await replaceComposerDraft(rerender, 1900, initialText);
+  let textarea = document.querySelector("textarea") as HTMLTextAreaElement | null;
+  if (!textarea) throw new Error("composer textarea did not render for middle slash completion");
+  const slashCaret = "请用/writ".length;
+  await act(async () => {
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    await flushTimers();
+  });
+  await act(async () => {
+    textarea!.focus();
+    textarea!.setSelectionRange(slashCaret, slashCaret);
+    textarea!.dispatchEvent(new window.Event("select", { bubbles: true }));
+    textarea!.dispatchEvent(new window.KeyboardEvent("keyup", { key: "/", bubbles: true }));
+    await flushTimers();
+  });
+  await waitFor("middle slash command menu", () => Boolean(document.querySelector(".slashmenu")));
+
+  await act(async () => {
+    textarea!.dispatchEvent(new window.KeyboardEvent("keydown", {
+      key: "Enter",
+      bubbles: true,
+      cancelable: true,
+    }));
+    await flushTimers();
+  });
+
+  let richInput = document.querySelector(".composer__rich-input") as HTMLDivElement | null;
+  let tokens = richInput?.querySelectorAll<HTMLElement>(".composer-invocation-token");
+  if (!richInput || !tokens?.[0]) throw new Error("middle skill invocation did not render");
+  eq(richComposerTaskText(richInput), "请用检查", "first middle skill selection preserves surrounding text");
+  eq(
+    document.querySelector<HTMLElement>(".invocation-display--composer")?.style.getPropertyValue("--invocation-color"),
+    "#d59a2f",
+    "middle skill selection keeps its configured color",
+  );
+
+  const afterFirstToken = document.createRange();
+  afterFirstToken.setStartAfter(tokens[0]);
+  afterFirstToken.collapse(true);
+  document.getSelection()?.removeAllRanges();
+  document.getSelection()?.addRange(afterFirstToken);
+  await act(async () => {
+    dispatchPasteText(richInput!, "更多");
+    await flushTimers();
+  });
+  richInput = document.querySelector(".composer__rich-input") as HTMLDivElement | null;
+  if (!richInput) throw new Error("rich input disappeared after middle-skill paste");
+  eq(richComposerTaskText(richInput), "请用更多检查", "paste after a middle skill preserves the entity and suffix");
+  eq(
+    richInput.querySelectorAll(".composer-invocation-token").length,
+    1,
+    "paste after a middle skill keeps the selected entity",
+  );
+
+  await appendRichComposerInput(richInput, " /review");
+  richInput = document.querySelector(".composer__rich-input") as HTMLDivElement | null;
+  if (!richInput) throw new Error("rich input disappeared before the second skill selection");
+  const queryAtEnd = document.createRange();
+  queryAtEnd.selectNodeContents(richInput);
+  queryAtEnd.collapse(false);
+  document.getSelection()?.removeAllRanges();
+  document.getSelection()?.addRange(queryAtEnd);
+  await act(async () => {
+    richInput!.dispatchEvent(new window.KeyboardEvent("keyup", { key: "w", bubbles: true }));
+    await flushTimers();
+  });
+  await waitFor("second skill menu at the end", () => Boolean(document.querySelector(".slashmenu")));
+  await act(async () => {
+    richInput!.dispatchEvent(new window.KeyboardEvent("keydown", {
+      key: "Enter",
+      bubbles: true,
+      cancelable: true,
+    }));
+    await flushTimers();
+  });
+
+  richInput = document.querySelector(".composer__rich-input") as HTMLDivElement | null;
+  tokens = richInput?.querySelectorAll<HTMLElement>(".composer-invocation-token");
+  eq(tokens?.length, 2, "a second skill can be inserted after existing text and an entity");
+  const sendButton = document.querySelector(".composer__btn--send") as HTMLButtonElement | null;
+  if (!sendButton) throw new Error("send button did not render for middle skill submission");
+  await act(async () => {
+    sendButton.click();
+    await flushTimers();
+  });
+  eq(calls.structured[0]?.input, "请用更多检查", "middle skills submit the surrounding task text without slash tokens");
+  eq(
+    calls.structured[0]?.invocations.map((item) => item.name).join(","),
+    "writing-plans,review",
+    "multiple middle/end skills submit in visual order",
+  );
+  eq(calls.structured[0]?.invocations[0]?.offset, 2, "first middle skill keeps its text offset");
+
+  await act(async () => {
+    root.unmount();
+  });
+  dom.window.close();
+}
+
+{
+  const dom = installDom();
   let commandsCalls = 0;
   const slashArgInputs: string[] = [];
   let availableCommands: CommandInfo[] = [
@@ -1954,6 +2067,154 @@ console.log("\ncomposer goal toggle");
   await act(async () => {
     root.unmount();
   });
+  dom.window.close();
+}
+
+{
+  const dom = installDom();
+  mockApp({
+    Commands: async () => [
+      { name: "review", description: "Review the current task", kind: "skill" },
+    ],
+    ListDirForTab: async () => [],
+    SearchFileRefsForTab: async () => [],
+  });
+  const sessionA = "session:project:/repo:topic-a:session-a";
+  const sessionB = "session:project:/repo:topic-b:session-b";
+  const { root, rerender } = await renderComposer({ sessionKey: sessionA });
+
+  await replaceComposerDraft(rerender, 5000, "x/review");
+  await waitFor("session A slash menu", () => Boolean(document.querySelector(".slashmenu")));
+
+  await rerender({ sessionKey: sessionB, insertRequest: null });
+  await replaceComposerDraft(rerender, 5001, "b");
+  const sessionBInput = document.querySelector("textarea") as HTMLTextAreaElement | null;
+  if (!sessionBInput) throw new Error("session B textarea did not render");
+  await act(async () => {
+    sessionBInput.focus();
+    sessionBInput.setSelectionRange(1, 1);
+    sessionBInput.dispatchEvent(new window.KeyboardEvent("keyup", { key: "b", bubbles: true }));
+    await flushTimers();
+  });
+
+  await rerender({ sessionKey: sessionA, insertRequest: null });
+  eq(
+    (document.querySelector("textarea") as HTMLTextAreaElement | null)?.value,
+    "x/review",
+    "switching back restores session A slash draft",
+  );
+  await waitFor(
+    "restored session A slash menu",
+    () => Boolean(document.querySelector(".slashmenu")),
+  );
+  ok(
+    document.querySelector(".slashmenu") !== null,
+    "restoring a draft recomputes slash completion from its end caret",
+  );
+
+  await act(async () => {
+    root.unmount();
+  });
+  dom.window.close();
+}
+
+{
+  const dom = installDom();
+  mockApp({
+    Commands: async () => [
+      { name: "review", description: "Review the current task", kind: "skill" },
+    ],
+    ListDirForTab: async () => [],
+    SearchFileRefsForTab: async () => [],
+  });
+  const sessionA = "session:project:/repo:rich-topic-a:rich-session-a";
+  const sessionB = "session:project:/repo:rich-topic-b:rich-session-b";
+  const realRequestAnimationFrame = globalThis.requestAnimationFrame;
+  const queuedComposerFrames: FrameRequestCallback[] = [];
+  globalThis.requestAnimationFrame = (callback) => {
+    queuedComposerFrames.push(callback);
+    return queuedComposerFrames.length;
+  };
+  const { root, rerender } = await renderComposer({ sessionKey: sessionA });
+
+  await replaceComposerDraft(rerender, 6000, "/review");
+  await waitFor("session A first skill menu", () => Boolean(document.querySelector(".slashmenu")));
+  const textarea = document.querySelector("textarea") as HTMLTextAreaElement | null;
+  if (!textarea) throw new Error("session A textarea did not render");
+  await act(async () => {
+    textarea.dispatchEvent(new window.KeyboardEvent("keydown", {
+      key: "Enter",
+      bubbles: true,
+      cancelable: true,
+    }));
+    await flushTimers();
+  });
+
+  let richInput = document.querySelector(".composer__rich-input") as HTMLDivElement | null;
+  if (!richInput) throw new Error("session A rich input did not render");
+  await appendRichComposerInput(richInput, " /review");
+  richInput = document.querySelector(".composer__rich-input") as HTMLDivElement | null;
+  if (!richInput) throw new Error("session A rich input disappeared");
+  const queryAtEnd = document.createRange();
+  queryAtEnd.selectNodeContents(richInput);
+  queryAtEnd.collapse(false);
+  document.getSelection()?.removeAllRanges();
+  document.getSelection()?.addRange(queryAtEnd);
+  await act(async () => {
+    richInput.dispatchEvent(new window.KeyboardEvent("keyup", { key: "w", bubbles: true }));
+    await flushTimers();
+  });
+  await waitFor("session A second skill menu", () => Boolean(document.querySelector(".slashmenu")));
+
+  await rerender({ sessionKey: sessionB, insertRequest: null });
+  await replaceComposerDraft(rerender, 6001, "b");
+  await rerender({ sessionKey: sessionA, insertRequest: null });
+  await act(async () => {
+    let frameTime = 0;
+    while (queuedComposerFrames.length > 0) {
+      queuedComposerFrames.shift()?.(frameTime += 16);
+    }
+    await flushTimers();
+  });
+  richInput = document.querySelector(".composer__rich-input") as HTMLDivElement | null;
+  if (!richInput) throw new Error("session A rich input was not restored");
+  eq(richComposerTaskText(richInput), " /review", "switching back restores the rich invocation draft");
+  await waitFor(
+    "restored session A rich slash menu",
+    () => Boolean(document.querySelector(".slashmenu")),
+  );
+  ok(
+    document.querySelector(".slashmenu") !== null,
+    "restoring a rich invocation draft recomputes slash completion from its end caret",
+  );
+
+  await act(async () => {
+    richInput.dispatchEvent(new window.KeyboardEvent("keydown", {
+      key: "Enter",
+      bubbles: true,
+      cancelable: true,
+    }));
+    await flushTimers();
+  });
+  richInput = document.querySelector(".composer__rich-input") as HTMLDivElement | null;
+  eq(
+    richInput?.querySelectorAll(".composer-invocation-token").length,
+    2,
+    "the restored rich slash query can select a second skill",
+  );
+  eq(richInput ? richComposerTaskText(richInput) : "", " ", "selecting the restored query replaces its slash token");
+
+  await rerender({ sessionKey: sessionB, insertRequest: null });
+  eq(
+    (document.querySelector("textarea") as HTMLTextAreaElement | null)?.value,
+    "b",
+    "switching away again preserves the other session draft",
+  );
+
+  await act(async () => {
+    root.unmount();
+  });
+  globalThis.requestAnimationFrame = realRequestAnimationFrame;
   dom.window.close();
 }
 

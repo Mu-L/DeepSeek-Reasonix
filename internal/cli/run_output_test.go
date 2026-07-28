@@ -51,6 +51,56 @@ func TestRunOutputJSONResult(t *testing.T) {
 	}
 }
 
+func TestRunOutputJSONIncludesCurrencyAwareCostFields(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		currency string
+		wantCode string
+	}{
+		{name: "USD", currency: "$", wantCode: "USD"},
+		{name: "CNY", currency: "¥", wantCode: "CNY"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var out bytes.Buffer
+			sink := newRunOutputSink(&out, runOutputJSON)
+			sink.Emit(event.Event{
+				Kind:    event.Usage,
+				Usage:   &provider.Usage{PromptTokens: 1_000_000, CompletionTokens: 500_000},
+				Pricing: &provider.Pricing{Input: 1, Output: 2, Currency: tt.currency},
+			})
+			if err := sink.Finalize("abc", time.Now(), nil); err != nil {
+				t.Fatal(err)
+			}
+			var result runResult
+			if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+				t.Fatal(err)
+			}
+			if result.TotalCost != 2 || result.TotalCostUSD != result.TotalCost || result.Currency != tt.wantCode {
+				t.Fatalf("currency-aware result = %+v", result)
+			}
+		})
+	}
+}
+
+func TestRunOutputJSONRejectsMixedPricingCurrencies(t *testing.T) {
+	var out bytes.Buffer
+	sink := newRunOutputSink(&out, runOutputJSON)
+	for _, currency := range []string{"$", "¥"} {
+		sink.Emit(event.Event{
+			Kind:    event.Usage,
+			Usage:   &provider.Usage{PromptTokens: 1_000_000},
+			Pricing: &provider.Pricing{Input: 1, Currency: currency},
+		})
+	}
+	err := sink.Finalize("abc", time.Now(), nil)
+	if err == nil || !strings.Contains(err.Error(), "mixed pricing currencies") {
+		t.Fatalf("Finalize mixed currencies error = %v", err)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("mixed-currency JSON should not emit a misleading total: %s", out.String())
+	}
+}
+
 func TestRunOutputSessionIDPreservesExistingFormats(t *testing.T) {
 	const raw = "20260723-120000.000000000-model"
 	identityKey := bytes.Repeat([]byte{0x41}, machineIdentityKeyBytes)
