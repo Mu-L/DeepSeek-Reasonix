@@ -4,11 +4,23 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+func repairMutationTestKey(path string) string {
+	key, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return filepath.Clean(path)
+	}
+	if runtime.GOOS == "windows" {
+		return strings.ToLower(filepath.ToSlash(key))
+	}
+	return filepath.Clean(key)
+}
 
 func TestDecodeRepairPlanRejectsUnknownFieldsAndActions(t *testing.T) {
 	tests := []string{
@@ -329,7 +341,7 @@ func TestRepairMutationLockRechecksAfterWaiting(t *testing.T) {
 	reachedLock := make(chan struct{})
 	originalHook := repairMutationBeforeLock
 	repairMutationBeforeLock = func(paths []string) {
-		if len(paths) == 1 && paths[0] == tabs {
+		if len(paths) == 1 && paths[0] == repairMutationTestKey(tabs) {
 			select {
 			case <-reachedLock:
 			default:
@@ -385,14 +397,8 @@ func TestRepairTransactionLockSerializesDisjointTargets(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tabsPath, err := filepath.Abs(tabs)
-	if err != nil {
-		t.Fatal(err)
-	}
-	transactionPath, err := filepath.Abs(repairTransactionPath())
-	if err != nil {
-		t.Fatal(err)
-	}
+	tabsPath := repairMutationTestKey(tabs)
+	transactionPath := repairMutationTestKey(repairTransactionPath())
 	firstHolding := atomic.Bool{}
 	tabsReached := make(chan struct{})
 	releaseTabs := make(chan struct{})
