@@ -707,7 +707,7 @@ func TestRestoreConfigSnapshotCrossDeviceFallbackPreservesConcurrentRecreate(t *
 	}
 }
 
-func TestRestoreConfigSnapshotRetainsPublishedConfigWhenUndoPersistenceFails(t *testing.T) {
+func TestRestoreConfigSnapshotDoesNotPublishWhenUndoPersistenceFails(t *testing.T) {
 	t.Setenv("REASONIX_HOME", t.TempDir())
 	dest := config.UserConfigPath()
 	snapshot := []byte("default_model = \"snapshot\"\n")
@@ -728,12 +728,11 @@ func TestRestoreConfigSnapshotRetainsPublishedConfigWhenUndoPersistenceFails(t *
 		t.Fatal(err)
 	}
 
-	if _, err := RestoreConfigSnapshot(snapshots[0].ID); err == nil ||
-		!strings.Contains(err.Error(), "restored config retained") {
-		t.Fatalf("restore error = %v, want retained-config failure", err)
+	if _, err := RestoreConfigSnapshot(snapshots[0].ID); err == nil {
+		t.Fatal("restore succeeded without durable undo intent")
 	}
-	if got, err := os.ReadFile(dest); err != nil || string(got) != string(snapshot) {
-		t.Fatalf("published config = %q, %v; want retained %q", got, err, snapshot)
+	if _, err := os.Lstat(dest); !os.IsNotExist(err) {
+		t.Fatalf("config was published without durable undo intent: %v", err)
 	}
 }
 

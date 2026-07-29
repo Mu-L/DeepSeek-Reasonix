@@ -184,6 +184,9 @@ func RestoreConfigSnapshot(id string) (*RepairTransaction, error) {
 		return nil, err
 	}
 	defer unlockTransaction()
+	if err := reconcilePreparedRepairTransaction(); err != nil {
+		return nil, fmt.Errorf("restore config snapshot: reconcile pending mutation: %w", err)
+	}
 	unlock, err := lockRepairMutations(dest, dir, contentPath, metadataPath)
 	if err != nil {
 		return nil, err
@@ -192,10 +195,15 @@ func RestoreConfigSnapshot(id string) (*RepairTransaction, error) {
 	if err := verifyRepairPlanFileStates(preview[0].fileStates); err != nil {
 		return nil, err
 	}
-	return restoreConfigSnapshotBoundUnlocked(id, preview[0].fileStates, preview[0].afterContent)
+	return restoreConfigSnapshotBoundUnlocked(id, preview[0].fileStates, preview[0].afterContent, nil)
 }
 
-func restoreConfigSnapshotBoundUnlocked(id string, expectedStates map[string]string, confirmedSnapshot []byte) (*RepairTransaction, error) {
+func restoreConfigSnapshotBoundUnlocked(
+	id string,
+	expectedStates map[string]string,
+	confirmedSnapshot []byte,
+	planTx *RepairTransaction,
+) (*RepairTransaction, error) {
 	if err := verifyRepairPlanFileStates(expectedStates); err != nil {
 		return nil, err
 	}
@@ -231,11 +239,18 @@ func restoreConfigSnapshotBoundUnlocked(id string, expectedStates map[string]str
 	if err := verifyRepairPlanFileStates(expectedStates); err != nil {
 		return nil, err
 	}
+	b := confirmedSnapshot
+	if expectedStates == nil {
+		b = verifiedSnapshot
+	}
 	repairMutationBeforeRename(dest)
 	if err := verifyRepairPlanFileStates(expectedStates); err != nil {
 		return nil, err
 	}
-	tx := newRepairTransaction(time.Now())
+	tx := planTx
+	if tx == nil {
+		tx = newRepairTransaction(time.Now())
+	}
 	backup := filepath.Join(config.MemoryUserDir(), "repair", "restore-backups", tx.ID+".toml")
 	if expectedStates != nil {
 		backup = dest + ".reasonix-restore-" + tx.ID
@@ -249,6 +264,12 @@ func restoreConfigSnapshotBoundUnlocked(id string, expectedStates map[string]str
 		if err := os.MkdirAll(filepath.Dir(backup), 0o700); err != nil {
 			return nil, err
 		}
+		changeIndex := len(tx.Changes)
+		tx.Changes = append(tx.Changes, preparedRepairChangeForPrevious("global", dest, backup))
+		if err := persistPreparedRepairTransaction(tx); err != nil {
+			return nil, fmt.Errorf("prepare snapshot restore: %w", err)
+		}
+		repairMutationAfterPrepare(dest)
 		if renameErr := snapshotRename(dest, backup); renameErr == nil {
 			moved = true
 			repairMutationAfterRename(dest)
@@ -258,7 +279,17 @@ func restoreConfigSnapshotBoundUnlocked(id string, expectedStates map[string]str
 			// The repair state directory can live on another filesystem. Fall
 			// back to a unique sibling so displacement remains one atomic rename;
 			// copy-then-remove could delete a concurrent recreation of dest.
+			prepared := *tx
+			prepared.Changes = append([]RepairChange(nil), tx.Changes...)
+			if err := clearPreparedRepairTransaction(&prepared); err != nil {
+				return nil, fmt.Errorf("clear cross-device snapshot restore intent: %w", err)
+			}
 			backup = dest + ".reasonix-restore-" + tx.ID
+			tx.Changes[changeIndex].PreviousPath = backup
+			if err := persistPreparedRepairTransaction(tx); err != nil {
+				return nil, fmt.Errorf("prepare sibling snapshot restore: %w", err)
+			}
+			repairMutationAfterPrepare(dest)
 			if fallbackErr := snapshotRename(dest, backup); fallbackErr != nil {
 				return nil, errors.Join(
 					fmt.Errorf("restore config snapshot: move config to repair state: %w", renameErr),
@@ -269,63 +300,70 @@ func restoreConfigSnapshotBoundUnlocked(id string, expectedStates map[string]str
 			repairMutationAfterRename(dest)
 		}
 		if moved {
-			if _, err := os.Lstat(dest); err == nil {
-				// The original node is already safely displaced. Persist the
-				// transaction so undo restores it while retaining the
-				// uncooperative writer's replacement as redo material.
-				tx.Changes = append(tx.Changes, repairChangeForPrevious("global", dest, backup))
-				if saveErr := saveRepairTransaction(tx); saveErr != nil {
-					return nil, fmt.Errorf("target was recreated during snapshot restore; original state remains at %s; record undo: %v", backup, saveErr)
+			expected := tx.Changes[changeIndex].PreviousStateID
+			if err := verifyRepairPlanReleaseNodeStateFor(backup, dest, expected); err != nil {
+				return nil, joinRestoreCleanupError(err, backup, restoreRepairNodeIfAbsent(backup, dest))
+			}
+			if durable, err := commitPreparedRepairTransaction(tx, changeIndex); err != nil {
+				if durable {
+					return nil, fmt.Errorf("commit snapshot restore undo state: cleanup pending journal: %w", err)
 				}
+				return nil, joinRestoreCleanupError(err, backup, restoreRepairNodeIfAbsent(backup, dest))
+			}
+			if _, err := os.Lstat(dest); err == nil {
 				return nil, fmt.Errorf("target was recreated during snapshot restore; original state remains at %s", backup)
 			} else if !os.IsNotExist(err) {
 				return nil, err
 			}
-			if expected := expectedStates[dest]; expected != "" {
-				if err := verifyRepairPlanStateIDFor(backup, dest, expected); err != nil {
-					return nil, joinRestoreCleanupError(err, backup, restoreRepairNodeIfAbsent(backup, dest))
-				}
-			}
 		}
-		tx.Changes = append(tx.Changes, repairChangeForPrevious("global", dest, backup))
 	} else if os.IsNotExist(err) {
-		tx.Changes = append(tx.Changes, RepairChange{Scope: "global", TargetPath: dest, RemoveOnUndo: true})
+		createdStateID := repairPlanReadStateIDFor(
+			dest,
+			os.FileMode(0o600),
+			"file",
+			"",
+			b,
+			true,
+		)
+		tx.Changes = append(tx.Changes, preparedRepairChangeForCreate("global", dest, createdStateID))
 	} else {
 		return nil, err
 	}
-	transactionPersisted := false
-	if moved {
-		// Once the original node has moved, make its undo record durable before
-		// publishing the snapshot. A later create failure can then leave both the
-		// backup and transaction intact instead of risking overwrite during
-		// compensation.
-		if err := saveRepairTransaction(tx); err != nil {
-			return nil, joinRestoreCleanupError(err, backup, restoreRepairNodeIfAbsent(backup, dest))
+	if !moved {
+		changeIndex := len(tx.Changes) - 1
+		if err := persistPreparedRepairTransaction(tx); err != nil {
+			return nil, fmt.Errorf("prepare snapshot create: %w", err)
 		}
-		transactionPersisted = true
-	}
-	b := confirmedSnapshot
-	if expectedStates == nil {
-		b = verifiedSnapshot
+		repairMutationAfterPrepare(dest)
+		if err := fileutil.AtomicCreateFile(dest, b, 0o600); err != nil {
+			prepared := *tx
+			prepared.Changes = append([]RepairChange(nil), tx.Changes...)
+			clearErr := clearPreparedRepairTransaction(&prepared)
+			return nil, errors.Join(err, clearErr)
+		}
+		repairSnapshotAfterCreate(dest)
+		if err := verifyConfigSnapshotFile(dest, b); err != nil {
+			return nil, fmt.Errorf("restored config changed during publish: %w", err)
+		}
+		if durable, err := commitPreparedRepairTransaction(tx, changeIndex); err != nil {
+			if durable {
+				return nil, fmt.Errorf("commit snapshot create undo state: cleanup pending journal: %w", err)
+			}
+			return nil, fmt.Errorf("commit snapshot create undo state: %w", err)
+		}
+		return tx, nil
 	}
 	if err := fileutil.AtomicCreateFile(dest, b, 0o600); err != nil {
 		return nil, err
 	}
-	if transactionPersisted {
-		return tx, nil
-	}
-	if err := saveRepairTransaction(tx); err != nil {
-		if tx.Changes[0].RemoveOnUndo {
-			// There was no previous node to recover. Do not use a read-then-remove
-			// compensation: another writer can replace dest between those calls.
-			// Retaining the verified snapshot is safer than deleting an unowned
-			// config when the undo record cannot be persisted.
-			return nil, fmt.Errorf("%w; restored config retained at %s because undo state could not be recorded", err, dest)
-		}
-		return nil, err
+	repairSnapshotAfterCreate(dest)
+	if err := verifyConfigSnapshotFile(dest, b); err != nil {
+		return nil, fmt.Errorf("restored config changed during publish: %w", err)
 	}
 	return tx, nil
 }
+
+var repairSnapshotAfterCreate = func(string) {}
 
 func verifyConfirmedConfigSnapshot(snap ConfigSnapshot, content []byte) error {
 	if err := config.ValidateBytes(content); err != nil {

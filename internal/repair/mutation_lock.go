@@ -31,12 +31,21 @@ var repairMutationBeforeRename = func(string) {}
 // to create a new target after the confirmed node has been quarantined.
 var repairMutationAfterRename = func(string) {}
 
+// repairMutationAfterPrepare is a test seam for simulating process exit after
+// the write-ahead repair intent is durable but before the filesystem rename.
+var repairMutationAfterPrepare = func(string) {}
+
 var repairPathCaseInsensitive = platformRepairPathCaseInsensitive
 
 func lockRepairTransaction() (func(), error) {
+	expectedPendingState := repairPlanReleaseNodeState(pendingRepairTransactionPath())
 	unlock, err := lockRepairMutations(repairTransactionPath())
 	if err != nil {
 		return nil, fmt.Errorf("lock repair transaction: %w", err)
+	}
+	if actual := repairPlanReleaseNodeState(pendingRepairTransactionPath()); actual != expectedPendingState {
+		unlock()
+		return nil, fmt.Errorf("lock repair transaction: pending repair transaction changed while waiting")
 	}
 	return unlock, nil
 }

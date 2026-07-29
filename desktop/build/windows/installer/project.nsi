@@ -100,6 +100,8 @@ OutFile "..\..\bin\${INFO_PROJECTNAME}-${ARCH}-installer.exe" # Name of the inst
 !define REASONIX_LAUNCHER "reasonix-launcher.exe"
 !define REASONIX_CLI "reasonix-cli.exe"
 !define REASONIX_PORTABLE_ENTRY "Reasonix.exe"
+!define REASONIX_PAYLOAD_MANIFEST "reasonix-payload.json"
+!define REASONIX_PAYLOAD_SIGNATURE "reasonix-payload.json.minisig"
 !define REASONIX_UNLOCK_RETRIES 60
 Var ReasonixUpdateMode
 Var ReasonixStageMode
@@ -282,6 +284,18 @@ Section
 
 reasonix_copy_payload:
     SetOutPath $INSTDIR
+
+    ; The release workflow embeds a minisign-authenticated manifest after
+    ; SignPath has signed the five executable members. Only the extraction
+    ; handoff needs these files; a normal installation does not persist them.
+    StrCmp $ReasonixStageMode "1" 0 reasonix_payload_metadata_done
+    !if /FileExists "${REASONIX_PAYLOAD_MANIFEST}"
+    File "/oname=${REASONIX_PAYLOAD_MANIFEST}" "${REASONIX_PAYLOAD_MANIFEST}"
+    !endif
+    !if /FileExists "${REASONIX_PAYLOAD_SIGNATURE}"
+    File "/oname=${REASONIX_PAYLOAD_SIGNATURE}" "${REASONIX_PAYLOAD_SIGNATURE}"
+    !endif
+reasonix_payload_metadata_done:
 
     !insertmacro wails.files
     !if /FileExists "${REASONIX_UPDATE_HELPER}"

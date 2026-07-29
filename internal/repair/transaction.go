@@ -1,10 +1,13 @@
 package repair
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"time"
 
@@ -18,6 +21,14 @@ type RepairChange struct {
 	PreviousPath    string `json:"previousPath,omitempty"`
 	PreviousStateID string `json:"previousStateId,omitempty"`
 	RemoveOnUndo    bool   `json:"removeOnUndo,omitempty"`
+	// CreatedStateID binds a remove-on-undo entry to the exact node this repair
+	// intended to create. If type, mode, or bytes later differ, undo preserves
+	// it as an unowned concurrent write.
+	CreatedStateID string `json:"createdStateId,omitempty"`
+	// Prepared is a write-ahead filesystem-mutation intent. The exact previous
+	// state may still be at TargetPath (rename not run) or at PreviousPath
+	// (rename committed). Undo resolves either state without guessing.
+	Prepared bool `json:"prepared,omitempty"`
 	// Undone marks a change already reverted by an interrupted undo, so a
 	// retry can resume with the remaining changes instead of failing the
 	// preflight on the consumed backup of a change that is already restored.
@@ -25,12 +36,13 @@ type RepairChange struct {
 }
 
 type RepairTransaction struct {
-	SchemaVersion int            `json:"schemaVersion"`
-	ID            string         `json:"id"`
-	CreatedAt     string         `json:"createdAt"`
-	Changes       []RepairChange `json:"changes"`
-	Undone        bool           `json:"undone,omitempty"`
-	UndoneAt      string         `json:"undoneAt,omitempty"`
+	SchemaVersion             int            `json:"schemaVersion"`
+	ID                        string         `json:"id"`
+	CreatedAt                 string         `json:"createdAt"`
+	Changes                   []RepairChange `json:"changes"`
+	PreparedLastRepairStateID string         `json:"preparedLastRepairStateId,omitempty"`
+	Undone                    bool           `json:"undone,omitempty"`
+	UndoneAt                  string         `json:"undoneAt,omitempty"`
 }
 
 func newRepairTransaction(now time.Time) *RepairTransaction {
@@ -52,9 +64,36 @@ func repairChangeForPrevious(scope, target, previous string) RepairChange {
 	}
 }
 
+func preparedRepairChangeForPrevious(scope, target, previous string) RepairChange {
+	return RepairChange{
+		Scope:           scope,
+		TargetPath:      target,
+		PreviousPath:    previous,
+		PreviousStateID: repairPlanReleaseNodeStateFor(target, target),
+		Prepared:        true,
+	}
+}
+
+func preparedRepairChangeForCreate(scope, target, createdStateID string) RepairChange {
+	return RepairChange{
+		Scope:          scope,
+		TargetPath:     target,
+		RemoveOnUndo:   true,
+		CreatedStateID: createdStateID,
+		Prepared:       true,
+	}
+}
+
 func repairTransactionPath() string {
 	if root := config.MemoryUserDir(); root != "" {
 		return filepath.Join(root, "repair", "last-repair.json")
+	}
+	return ""
+}
+
+func pendingRepairTransactionPath() string {
+	if root := config.MemoryUserDir(); root != "" {
+		return filepath.Join(root, "repair", "pending-repair.json")
 	}
 	return ""
 }
@@ -85,6 +124,16 @@ func appendRepairLogBestEffort(tx *RepairTransaction) {
 }
 
 func persistRepairTransaction(tx *RepairTransaction) error {
+	if tx != nil {
+		if strings.TrimSpace(tx.PreparedLastRepairStateID) != "" {
+			return fmt.Errorf("last repair transaction contains pending-only state")
+		}
+		for _, change := range tx.Changes {
+			if change.Prepared {
+				return fmt.Errorf("last repair transaction contains a prepared change")
+			}
+		}
+	}
 	path := repairTransactionPath()
 	if path == "" {
 		return nil
@@ -93,7 +142,198 @@ func persistRepairTransaction(tx *RepairTransaction) error {
 	if err != nil {
 		return err
 	}
-	return fileutil.AtomicWriteFile(path, append(b, '\n'), 0o600)
+	if err := fileutil.AtomicWriteFile(path, append(b, '\n'), 0o600); err != nil {
+		return err
+	}
+	repairTransactionAfterPersist(tx)
+	return nil
+}
+
+var repairTransactionAfterPersist = func(*RepairTransaction) {}
+var repairPendingAfterMove = func(string, string) {}
+
+func persistPreparedRepairTransaction(tx *RepairTransaction) error {
+	if tx == nil || len(tx.Changes) == 0 || !tx.Changes[len(tx.Changes)-1].Prepared {
+		return fmt.Errorf("pending repair transaction is incomplete")
+	}
+	path := pendingRepairTransactionPath()
+	if path == "" {
+		return fmt.Errorf("pending repair state path is unavailable")
+	}
+	if _, err := os.Lstat(repairTransactionPath()); err == nil {
+		if _, err := ReadLastRepair(); err != nil {
+			return fmt.Errorf("prepare repair: current undo state is invalid: %w", err)
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("prepare repair: inspect current undo state: %w", err)
+	}
+	// Bind the journal to the undo state it is allowed to replace. A stale
+	// pending file must never promote itself over a newer completed repair.
+	tx.PreparedLastRepairStateID = repairPlanReleaseNodeState(repairTransactionPath())
+	b, err := json.MarshalIndent(tx, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := fileutil.AtomicCreateFile(path, append(b, '\n'), 0o600); err != nil {
+		return fmt.Errorf("publish pending repair transaction: %w", err)
+	}
+	return nil
+}
+
+func clearPreparedRepairTransaction(expected *RepairTransaction) error {
+	if expected == nil {
+		return fmt.Errorf("pending repair transaction identity is incomplete")
+	}
+	path := pendingRepairTransactionPath()
+	if path == "" {
+		return nil
+	}
+	cleanup, err := moveRepairNodeToUniqueCleanup(path)
+	if err != nil || cleanup == "" {
+		return err
+	}
+	repairPendingAfterMove(path, cleanup)
+	restoreUnknown := func(cause error) error {
+		if restoreErr := renameRepairNodeNoReplace(cleanup, path); restoreErr != nil {
+			return fmt.Errorf("%w; displaced pending repair retained at %s: %v", cause, cleanup, restoreErr)
+		}
+		return cause
+	}
+	b, err := os.ReadFile(cleanup)
+	if err != nil {
+		return restoreUnknown(fmt.Errorf("read displaced pending repair: %w", err))
+	}
+	var actual RepairTransaction
+	if err := json.Unmarshal(b, &actual); err != nil {
+		return restoreUnknown(fmt.Errorf("pending repair transaction changed before cleanup: %w", err))
+	}
+	if !reflect.DeepEqual(&actual, expected) {
+		return restoreUnknown(fmt.Errorf("pending repair transaction changed before cleanup"))
+	}
+	// Do not unlink the moved journal. A path-based remove has an unavoidable
+	// check/remove race: an uncooperative writer could replace cleanup after the
+	// equality check and have its node deleted. The uniquely named, inactive
+	// journal is small and doubles as crash-recovery evidence.
+	if _, err := os.Lstat(path); err == nil {
+		return fmt.Errorf("a new pending repair transaction appeared during cleanup")
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+// reconcilePreparedRepairTransaction runs while the repair transaction lock is
+// held. It promotes a crashed post-rename intent into last-repair.json, or
+// discards an intent whose exact source is still live and therefore never
+// committed. Ambiguous state remains fail closed for manual recovery.
+func reconcilePreparedRepairTransaction() error {
+	path := pendingRepairTransactionPath()
+	if path == "" {
+		return nil
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	var tx RepairTransaction
+	if err := json.Unmarshal(b, &tx); err != nil {
+		return fmt.Errorf("pending repair transaction is invalid: %w", err)
+	}
+	if tx.SchemaVersion != 1 || tx.ID == "" || len(tx.Changes) == 0 ||
+		!validRepairStateID(tx.PreparedLastRepairStateID) {
+		return fmt.Errorf("pending repair transaction is incomplete")
+	}
+	for i, change := range tx.Changes {
+		if err := validateRepairChange(change); err != nil {
+			return err
+		}
+		if change.Prepared != (i == len(tx.Changes)-1) {
+			return fmt.Errorf("pending repair transaction has an invalid prepared prefix")
+		}
+	}
+	last := tx.Changes[len(tx.Changes)-1]
+	unlockTargets, err := lockRepairMutations(last.TargetPath, last.PreviousPath)
+	if err != nil {
+		return err
+	}
+	defer unlockTargets()
+
+	// The target lock may have blocked behind another cooperative process.
+	// Re-read the journal so that process cannot substitute a different intent
+	// between validation and promotion.
+	currentPendingBytes, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var currentPending RepairTransaction
+	if err := json.Unmarshal(currentPendingBytes, &currentPending); err != nil {
+		return fmt.Errorf("pending repair transaction changed while waiting: %w", err)
+	}
+	if !reflect.DeepEqual(&currentPending, &tx) {
+		return fmt.Errorf("pending repair transaction changed while waiting")
+	}
+
+	committed := tx
+	committed.Changes = append([]RepairChange(nil), tx.Changes...)
+	committed.Changes[len(committed.Changes)-1].Prepared = false
+	committed.PreparedLastRepairStateID = ""
+	currentLast, readLastErr := ReadLastRepair()
+	if readLastErr == nil && reflect.DeepEqual(currentLast, &committed) {
+		// last-repair.json was already published and only journal cleanup was
+		// interrupted. Its backup must not be compensated or reclassified.
+		return clearPreparedRepairTransaction(&tx)
+	}
+	if readLastErr != nil && !os.IsNotExist(readLastErr) {
+		return fmt.Errorf("pending repair transaction cannot replace invalid undo state: %w", readLastErr)
+	}
+	if actual := repairPlanReleaseNodeState(repairTransactionPath()); actual != tx.PreparedLastRepairStateID {
+		return fmt.Errorf("pending repair transaction no longer matches the previous undo state")
+	}
+	applied, err := preparedRepairChangeApplied(last)
+	if err != nil {
+		return err
+	}
+	if applied {
+		if err := persistRepairTransaction(&committed); err != nil {
+			return err
+		}
+	}
+	return clearPreparedRepairTransaction(&tx)
+}
+
+// commitPreparedRepairTransaction reports whether last-repair.json became
+// durable separately from journal-cleanup errors. Once durable is true callers
+// must retain the backup referenced by the undo record and never compensate the
+// already committed rename.
+func commitPreparedRepairTransaction(tx *RepairTransaction, changeIndex int) (durable bool, err error) {
+	if tx == nil || changeIndex < 0 || changeIndex >= len(tx.Changes) || !tx.Changes[changeIndex].Prepared {
+		return false, fmt.Errorf("prepared repair transaction is incomplete")
+	}
+	pending := *tx
+	pending.Changes = append([]RepairChange(nil), tx.Changes...)
+	tx.Changes[changeIndex].Prepared = false
+	tx.PreparedLastRepairStateID = ""
+	if err := persistRepairTransaction(tx); err != nil {
+		tx.Changes[changeIndex].Prepared = true
+		tx.PreparedLastRepairStateID = pending.PreparedLastRepairStateID
+		return false, err
+	}
+	if err := clearPreparedRepairTransaction(&pending); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
+func validRepairStateID(value string) bool {
+	value = strings.TrimSpace(value)
+	if len(value) != sha256.Size*2 || value != strings.ToLower(value) {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
 }
 
 func appendRepairLog(tx *RepairTransaction) error {
@@ -133,7 +373,13 @@ func ReadLastRepair() (*RepairTransaction, error) {
 	if tx.SchemaVersion != 1 || tx.ID == "" || len(tx.Changes) == 0 {
 		return nil, fmt.Errorf("last repair transaction is incomplete")
 	}
+	if strings.TrimSpace(tx.PreparedLastRepairStateID) != "" {
+		return nil, fmt.Errorf("last repair transaction contains pending-only state")
+	}
 	for _, change := range tx.Changes {
+		if change.Prepared {
+			return nil, fmt.Errorf("last repair transaction contains a prepared change")
+		}
 		if err := validateRepairChange(change); err != nil {
 			return nil, err
 		}
@@ -165,7 +411,17 @@ func validateRepairChange(change RepairChange) error {
 		if change.Scope != "global" || change.PreviousPath != "" {
 			return fmt.Errorf("repair transaction remove-on-undo action is invalid")
 		}
+		value := strings.TrimSpace(change.CreatedStateID)
+		if change.Prepared && value == "" {
+			return fmt.Errorf("repair transaction prepared create state is invalid")
+		}
+		if value != "" && !validRepairStateID(value) {
+			return fmt.Errorf("repair transaction created state is invalid")
+		}
 		return nil
+	}
+	if change.Prepared && strings.TrimSpace(change.PreviousStateID) == "" {
+		return fmt.Errorf("repair transaction prepared state is invalid")
 	}
 	previous := filepath.Clean(change.PreviousPath)
 	if filepath.Dir(previous) == filepath.Dir(target) && strings.HasPrefix(filepath.Base(previous), filepath.Base(target)+".reasonix-") {
@@ -218,32 +474,31 @@ var (
 // UndoLastRepair restores the exact files moved aside by the latest repair. Any
 // currently repaired file is retained as a timestamped redo candidate.
 func UndoLastRepair() (*RepairTransaction, error) {
-	invocation, err := ReadLastRepair()
-	if err != nil {
-		return nil, err
-	}
-	if invocation.Undone {
-		return nil, fmt.Errorf("repair %s was already undone", invocation.ID)
-	}
-	if err := verifyUndoRepairBackups(invocation); err != nil {
-		return nil, err
-	}
-	invocationID := repairPlanStateID(invocation)
+	invocationLastState := repairPlanReleaseNodeState(repairTransactionPath())
+	invocationPendingState := repairPlanReleaseNodeState(pendingRepairTransactionPath())
 	unlockTransaction, err := lockRepairTransaction()
 	if err != nil {
 		return nil, err
 	}
 	defer unlockTransaction()
+	if repairPlanReleaseNodeState(repairTransactionPath()) != invocationLastState ||
+		repairPlanReleaseNodeState(pendingRepairTransactionPath()) != invocationPendingState {
+		return nil, fmt.Errorf("undo repair: repair transaction changed while waiting")
+	}
+	if err := reconcilePreparedRepairTransaction(); err != nil {
+		return nil, fmt.Errorf("undo repair: reconcile pending mutation: %w", err)
+	}
 	tx, err := ReadLastRepair()
 	if err != nil {
 		return nil, err
 	}
-	if repairPlanStateID(tx) != invocationID {
-		return nil, fmt.Errorf("undo repair: last repair transaction changed while waiting")
+	if tx.Undone {
+		return nil, fmt.Errorf("repair %s was already undone", tx.ID)
 	}
 	if err := verifyUndoRepairBackups(tx); err != nil {
 		return nil, err
 	}
+	invocationID := repairPlanStateID(tx)
 	targets := make([]string, 0, len(tx.Changes))
 	for _, change := range tx.Changes {
 		targets = append(targets, change.TargetPath)
@@ -281,8 +536,47 @@ func UndoLastRepair() (*RepairTransaction, error) {
 			}
 			continue
 		}
+		if change.Prepared {
+			applied, resolveErr := preparedRepairChangeApplied(change)
+			if resolveErr != nil {
+				return nil, fmt.Errorf("undo repair: resolve prepared change: %w", resolveErr)
+			}
+			if !applied {
+				if err := markUndone(i); err != nil {
+					return nil, err
+				}
+				continue
+			}
+		}
 		previousStateID := strings.TrimSpace(change.PreviousStateID)
 		redo := ""
+		if change.RemoveOnUndo && strings.TrimSpace(change.CreatedStateID) != "" {
+			info, statErr := os.Lstat(change.TargetPath)
+			if os.IsNotExist(statErr) {
+				if err := markUndone(i); err != nil {
+					return nil, err
+				}
+				continue
+			}
+			if statErr != nil {
+				return nil, fmt.Errorf("undo repair: inspect created file: %w", statErr)
+			}
+			owned := info.Mode().IsRegular() &&
+				verifyRepairPlanReleaseNodeStateFor(
+					change.TargetPath,
+					change.TargetPath,
+					change.CreatedStateID,
+				) == nil
+			if !owned {
+				// A failed/crashed create intent may be followed by an
+				// uncooperative writer. It is not this repair's file, so leave
+				// it live while allowing earlier plan changes to be undone.
+				if err := markUndone(i); err != nil {
+					return nil, err
+				}
+				continue
+			}
+		}
 		// Lstat so a dangling symlink at the target is still moved aside
 		// instead of being clobbered by the restore below.
 		if _, err := os.Lstat(change.TargetPath); err == nil {
@@ -402,6 +696,15 @@ func verifyUndoRepairBackups(tx *RepairTransaction) error {
 		if change.Undone {
 			continue
 		}
+		if change.Prepared {
+			applied, err := preparedRepairChangeApplied(change)
+			if err != nil {
+				return fmt.Errorf("undo repair: resolve prepared change: %w", err)
+			}
+			if !applied {
+				continue
+			}
+		}
 		// Lstat: a quarantined symlink counts as present even when its link
 		// target is gone. Undo restores the link node, not its referent.
 		if _, err := os.Lstat(change.PreviousPath); err != nil {
@@ -412,4 +715,47 @@ func verifyUndoRepairBackups(tx *RepairTransaction) error {
 		}
 	}
 	return nil
+}
+
+func preparedRepairChangeApplied(change RepairChange) (bool, error) {
+	if !change.Prepared {
+		return true, nil
+	}
+	if change.RemoveOnUndo {
+		if _, err := os.Lstat(change.TargetPath); err == nil {
+			// The target was absent when the intent was prepared. Any node now
+			// present makes this the newest repair transaction, but undo removes
+			// it only when CreatedStateID proves the repair owns the exact node.
+			return true, nil
+		} else if os.IsNotExist(err) {
+			return false, nil
+		} else {
+			return false, err
+		}
+	}
+	expected := strings.TrimSpace(change.PreviousStateID)
+	if expected == "" {
+		return false, fmt.Errorf("prepared previous state identity is missing")
+	}
+	targetExists := true
+	if _, err := os.Lstat(change.TargetPath); err != nil {
+		if !os.IsNotExist(err) {
+			return false, err
+		}
+		targetExists = false
+	}
+	if targetExists && verifyRepairPlanReleaseNodeStateFor(change.TargetPath, change.TargetPath, expected) == nil {
+		// The exact source is still live, so the no-replace rename did not
+		// commit. Ignore an unrelated/colliding node at PreviousPath.
+		return false, nil
+	}
+	if _, err := os.Lstat(change.PreviousPath); err == nil {
+		if err := verifyRepairPlanReleaseNodeStateFor(change.PreviousPath, change.TargetPath, expected); err != nil {
+			return false, fmt.Errorf("prepared previous state changed: %w", err)
+		}
+		return true, nil
+	} else if !os.IsNotExist(err) {
+		return false, err
+	}
+	return false, fmt.Errorf("prepared state is not present at its target or previous path")
 }

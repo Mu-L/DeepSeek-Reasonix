@@ -92,7 +92,7 @@ func TestClaimPendingAppBundleUpdateHandoffExactRejectsRewrittenTransaction(t *t
 	tx, _ := prepareTestAppBundleHandoff(t)
 	changed := *tx
 	changed.FromVersion = "rewritten"
-	if err := WritePendingUpdate(&changed); err != nil {
+	if err := overwritePendingUpdateForTest(&changed); err != nil {
 		t.Fatal(err)
 	}
 
@@ -210,7 +210,7 @@ func TestClaimPendingAppBundleUpdateHandoffRejectsUnboundTarget(t *testing.T) {
 	tx.TargetPath = arbitrary
 	tx.BackupPath = arbitrary + ".reasonix-update-backup"
 	tx.HandoffAppPath = filepath.Join(staging, "Other.app")
-	if err := WritePendingUpdate(tx); err != nil {
+	if err := overwritePendingUpdateForTest(tx); err != nil {
 		t.Fatal(err)
 	}
 
@@ -230,7 +230,7 @@ func TestClaimPendingAppBundleUpdateHandoffRejectsLegacyTransaction(t *testing.T
 	tx.HandoffAppTreeID = ""
 	tx.HandoffStagingTreeID = ""
 	tx.HandoffOwnerPID = 0
-	if err := WritePendingUpdate(tx); err != nil {
+	if err := overwritePendingUpdateForTest(tx); err != nil {
 		t.Fatal(err)
 	}
 
@@ -249,7 +249,7 @@ func TestClaimPendingAppBundleUpdateHandoffRejectsLegacyTransaction(t *testing.T
 func TestClaimPendingAppBundleUpdateHandoffRejectsMissingStagingDigest(t *testing.T) {
 	tx, _ := prepareTestAppBundleHandoff(t)
 	tx.HandoffStagingTreeID = ""
-	if err := WritePendingUpdate(tx); err != nil {
+	if err := overwritePendingUpdateForTest(tx); err != nil {
 		t.Fatal(err)
 	}
 
@@ -281,7 +281,7 @@ func TestClaimPendingAppBundleUpdateHandoffRejectsReplacementWhileLocking(t *tes
 			return
 		}
 		changed = true
-		if err := WritePendingUpdate(&replacement); err != nil {
+		if err := overwritePendingUpdateForTest(&replacement); err != nil {
 			t.Errorf("replace pending transaction: %v", err)
 		}
 	}
@@ -432,7 +432,7 @@ func TestCancelPendingAppBundleUpdateHandoffExactRejectsRewrittenTransaction(t *
 	tx, _ := prepareTestAppBundleHandoff(t)
 	changed := *tx
 	changed.HandoffOwnerPID++
-	if err := WritePendingUpdate(&changed); err != nil {
+	if err := overwritePendingUpdateForTest(&changed); err != nil {
 		t.Fatal(err)
 	}
 

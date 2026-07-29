@@ -58,6 +58,8 @@ func TestWindowsInstallerScriptWaitsBeforeCopyingExecutable(t *testing.T) {
 		`!define REASONIX_LAUNCHER "reasonix-launcher.exe"`,
 		`!define REASONIX_CLI "reasonix-cli.exe"`,
 		`!define REASONIX_PORTABLE_ENTRY "Reasonix.exe"`,
+		`!define REASONIX_PAYLOAD_MANIFEST "reasonix-payload.json"`,
+		`!define REASONIX_PAYLOAD_SIGNATURE "reasonix-payload.json.minisig"`,
 		"Var ReasonixUpdateMode",
 		"Var ReasonixStageMode",
 		`${GetOptions} $R0 "/REASONIXUPDATE=" $R1`,
@@ -86,6 +88,8 @@ func TestWindowsInstallerScriptWaitsBeforeCopyingExecutable(t *testing.T) {
 		`File "/oname=${REASONIX_UPDATE_HELPER}" "${REASONIX_UPDATE_HELPER}"`,
 		`File "/oname=${REASONIX_CLI}" "${REASONIX_CLI}"`,
 		`File "/oname=${REASONIX_PORTABLE_ENTRY}" "${REASONIX_LAUNCHER}"`,
+		`File "/oname=${REASONIX_PAYLOAD_MANIFEST}" "${REASONIX_PAYLOAD_MANIFEST}"`,
+		`File "/oname=${REASONIX_PAYLOAD_SIGNATURE}" "${REASONIX_PAYLOAD_SIGNATURE}"`,
 		`Delete "$INSTDIR\${REASONIX_UPDATE_HELPER}"`,
 		`Delete "$INSTDIR\${REASONIX_CLI}"`,
 	} {
@@ -109,6 +113,11 @@ func TestWindowsInstallerScriptWaitsBeforeCopyingExecutable(t *testing.T) {
 	}
 	if !strings.Contains(script, "StrCmp $ReasonixStageMode \"1\" reasonix_section_done") {
 		t.Fatal("staging mode must skip registry, shortcuts, associations, and uninstaller")
+	}
+	metadataBranch := strings.Index(script, `StrCmp $ReasonixStageMode "1" 0 reasonix_payload_metadata_done`)
+	metadataFile := strings.Index(script, `File "/oname=${REASONIX_PAYLOAD_MANIFEST}"`)
+	if metadataBranch < 0 || metadataFile < 0 || metadataBranch > metadataFile {
+		t.Fatalf("payload manifest must be extracted only in staging mode (branch=%d file=%d)", metadataBranch, metadataFile)
 	}
 }
 

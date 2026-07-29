@@ -35,6 +35,7 @@ type ConfigOptions struct {
 	expectedStates         map[string]string
 	confirmedGlobalRestore []byte
 	hasConfirmedRestore    bool
+	repairTransaction      *RepairTransaction
 }
 
 func InspectAndRepairConfig(opts ConfigOptions) (ConfigReport, error) {
@@ -64,6 +65,9 @@ func InspectAndRepairConfig(opts ConfigOptions) (ConfigReport, error) {
 		return ConfigReport{}, err
 	}
 	defer unlockTransaction()
+	if err := reconcilePreparedRepairTransaction(); err != nil {
+		return ConfigReport{}, fmt.Errorf("repair config: reconcile pending mutation: %w", err)
+	}
 	unlock, err := lockRepairMutations(paths...)
 	if err != nil {
 		return ConfigReport{}, err
@@ -89,7 +93,10 @@ func inspectAndRepairConfigUnlocked(opts ConfigOptions) (ConfigReport, error) {
 	}
 	paths := []struct{ scope, path string }{{"global", global}, {"project", project}}
 	report := ConfigReport{Checks: make([]ConfigCheck, 0, len(paths)), Applied: []string{}}
-	tx := newRepairTransaction(opts.Now())
+	tx := opts.repairTransaction
+	if tx == nil {
+		tx = newRepairTransaction(opts.Now())
+	}
 	for _, item := range paths {
 		check := inspectConfig(item.scope, item.path)
 		if item.scope == "global" {
@@ -117,22 +124,16 @@ func inspectAndRepairConfigUnlocked(opts ConfigOptions) (ConfigReport, error) {
 			}
 		}
 		quarantine := item.path + ".reasonix-quarantine-" + opts.Now().UTC().Format("20060102T150405Z")
+		changeIndex := len(tx.Changes)
+		tx.Changes = append(tx.Changes, preparedRepairChangeForPrevious(item.scope, item.path, quarantine))
+		if err := persistPreparedRepairTransaction(tx); err != nil {
+			return report, fmt.Errorf("prepare quarantine %s config: %w", item.scope, err)
+		}
+		repairMutationAfterPrepare(item.path)
 		if err := renameRepairNodeNoReplace(item.path, quarantine); err != nil {
 			return report, fmt.Errorf("quarantine %s config: %w", item.scope, err)
 		}
 		repairMutationAfterRename(item.path)
-		if _, err := os.Lstat(item.path); err == nil {
-			// The confirmed node already moved; record it so UndoLastRepair can
-			// restore it and retain the concurrent rewrite as a redo copy.
-			tx.Changes = append(tx.Changes, repairChangeForPrevious(item.scope, item.path, quarantine))
-			if persistErr := persistRepairTransaction(tx); persistErr != nil {
-				return report, fmt.Errorf("repair plan preview changed since confirmation; target was recreated during quarantine; confirmed state remains at %s; record undo: %v", quarantine, persistErr)
-			}
-			appendRepairLogBestEffort(tx)
-			return report, fmt.Errorf("repair plan preview changed since confirmation; target was recreated during quarantine; confirmed state remains at %s", quarantine)
-		} else if !os.IsNotExist(err) {
-			return report, err
-		}
 		if expected := opts.expectedStates[item.path]; expected != "" {
 			if err := verifyRepairPlanStateIDFor(quarantine, item.path, expected); err != nil {
 				if restoreErr := restoreRepairNodeIfAbsent(quarantine, item.path); restoreErr != nil {
@@ -141,14 +142,23 @@ func inspectAndRepairConfigUnlocked(opts ConfigOptions) (ConfigReport, error) {
 				return report, err
 			}
 		}
-		report.Applied = append(report.Applied, "quarantined "+item.scope+" config at "+quarantine)
-		tx.Changes = append(tx.Changes, repairChangeForPrevious(item.scope, item.path, quarantine))
-		if err := persistRepairTransaction(tx); err != nil {
-			if restoreErr := restoreRepairNodeIfAbsent(quarantine, item.path); restoreErr != nil {
-				return report, fmt.Errorf("%w; confirmed config retained at %s: %v", err, quarantine, restoreErr)
+		if durable, err := commitPreparedRepairTransaction(tx, changeIndex); err != nil {
+			if durable {
+				return report, fmt.Errorf("commit quarantine %s config undo state: cleanup pending journal: %w", item.scope, err)
 			}
+			restoreErr := restoreRepairNodeIfAbsent(quarantine, item.path)
+			if restoreErr != nil {
+				return report, fmt.Errorf("commit quarantine %s config undo state: %w; confirmed config retained at %s: %v", item.scope, err, quarantine, restoreErr)
+			}
+			return report, fmt.Errorf("commit quarantine %s config undo state: %w", item.scope, err)
+		}
+		if _, err := os.Lstat(item.path); err == nil {
+			appendRepairLogBestEffort(tx)
+			return report, fmt.Errorf("repair plan preview changed since confirmation; target was recreated during quarantine; confirmed state remains at %s", quarantine)
+		} else if !os.IsNotExist(err) {
 			return report, err
 		}
+		report.Applied = append(report.Applied, "quarantined "+item.scope+" config at "+quarantine)
 		if item.scope == "global" {
 			restoreErr := os.ErrNotExist
 			if opts.expectedStates != nil {

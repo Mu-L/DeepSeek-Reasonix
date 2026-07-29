@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -804,21 +805,64 @@ func extractBinary(targz []byte, name string) ([]byte, error) {
 	return nil, fmt.Errorf("update: %q not found in archive", name)
 }
 
+func extractLinuxReleaseUnit(targz []byte) (map[string][]byte, error) {
+	const (
+		desktop = "reasonix-desktop"
+		guard   = "reasonix-guard"
+		cli     = "reasonix"
+	)
+	want := map[string]struct{}{desktop: {}, guard: {}, cli: {}}
+	found := make(map[string][]byte, len(want))
+	gz, err := gzip.NewReader(bytes.NewReader(targz))
+	if err != nil {
+		return nil, err
+	}
+	defer gz.Close()
+	tr := tar.NewReader(gz)
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		name := path.Base(strings.TrimSpace(h.Name))
+		if _, ok := want[name]; !ok {
+			continue
+		}
+		if h.Typeflag != tar.TypeReg || h.Size < 0 {
+			return nil, fmt.Errorf("update: release member %q is not a regular file", name)
+		}
+		if _, duplicate := found[name]; duplicate {
+			return nil, fmt.Errorf("update: release member %q appears more than once", name)
+		}
+		body, err := io.ReadAll(tr)
+		if err != nil {
+			return nil, err
+		}
+		found[name] = body
+	}
+	if len(found) != len(want) {
+		for name := range want {
+			if _, ok := found[name]; !ok {
+				return nil, fmt.Errorf("update: release member %q not found in archive", name)
+			}
+		}
+	}
+	return found, nil
+}
+
 // applyLinux replaces the running binary with the one inside the downloaded
 // tar.gz; the caller relaunches afterwards.
 func applyLinux(targz []byte, prepared *repair.UpdateTransaction) error {
-	bin, err := extractBinary(targz, "reasonix-desktop")
+	release, err := extractLinuxReleaseUnit(targz)
 	if err != nil {
 		return err
 	}
-	guard, err := extractBinary(targz, "reasonix-guard")
-	if err != nil {
-		return err
-	}
-	cli, err := extractBinary(targz, "reasonix")
-	if err != nil {
-		return err
-	}
+	bin := release["reasonix-desktop"]
+	guard := release["reasonix-guard"]
+	cli := release["reasonix"]
 	exe := currentExecutablePathForLinux()
 	if exe == "" {
 		return fmt.Errorf("update: current executable path is unavailable")
@@ -842,10 +886,11 @@ func applyLinux(targz []byte, prepared *repair.UpdateTransaction) error {
 	if err := repair.MarkUpdateApplyFailedExact(claimed, "Linux update publish did not complete"); err != nil {
 		return fmt.Errorf("update: record recovery intent: %w", err)
 	}
-	if err := applyLinuxReleaseUnit(claimed, exe, bin, guard, cli); err != nil {
+	receipts, err := applyLinuxReleaseUnit(claimed, exe, bin, guard, cli)
+	if err != nil {
 		return err
 	}
-	if _, err := repair.RecordClaimedFileUpdateInstalled(claimed); err != nil {
+	if _, err := repair.RecordClaimedFileUpdateInstalled(claimed, receipts...); err != nil {
 		return fmt.Errorf("update: record installed release unit: %w", err)
 	}
 	// pending-update.json remains immutable; the transaction-unique sidecar now
@@ -857,17 +902,28 @@ func applyLinux(targz []byte, prepared *repair.UpdateTransaction) error {
 
 var currentExecutablePathForLinux = currentExecutablePath
 
-var applyLinuxReleaseUnit = func(claimed *repair.UpdateTransaction, exe string, bin, guard, cli []byte) error {
-	if err := repair.PublishClaimedFileUpdateMember(claimed, filepath.Join(filepath.Dir(exe), "reasonix"), cli, 0o700); err != nil {
-		return fmt.Errorf("update CLI sidecar: %w", err)
+var applyLinuxReleaseUnit = func(
+	claimed *repair.UpdateTransaction,
+	exe string,
+	bin, guard, cli []byte,
+) ([]repair.FileUpdateInstallReceipt, error) {
+	receipts := make([]repair.FileUpdateInstallReceipt, 0, 3)
+	receipt, err := repair.PublishClaimedFileUpdateMemberExact(claimed, filepath.Join(filepath.Dir(exe), "reasonix"), cli, 0o700)
+	if err != nil {
+		return receipts, fmt.Errorf("update CLI sidecar: %w", err)
 	}
-	if err := repair.PublishClaimedFileUpdateMember(claimed, filepath.Join(filepath.Dir(exe), "reasonix-guard"), guard, 0o700); err != nil {
-		return fmt.Errorf("update Guard: %w", err)
+	receipts = append(receipts, receipt)
+	receipt, err = repair.PublishClaimedFileUpdateMemberExact(claimed, filepath.Join(filepath.Dir(exe), "reasonix-guard"), guard, 0o700)
+	if err != nil {
+		return receipts, fmt.Errorf("update Guard: %w", err)
 	}
-	if err := repair.PublishClaimedFileUpdateMember(claimed, exe, bin, 0o700); err != nil {
-		return fmt.Errorf("update desktop: %w", err)
+	receipts = append(receipts, receipt)
+	receipt, err = repair.PublishClaimedFileUpdateMemberExact(claimed, exe, bin, 0o700)
+	if err != nil {
+		return receipts, fmt.Errorf("update desktop: %w", err)
 	}
-	return nil
+	receipts = append(receipts, receipt)
+	return receipts, nil
 }
 
 func applyWindowsFile(path, expectedSHA256 string, prepared *repair.UpdateTransaction) error {

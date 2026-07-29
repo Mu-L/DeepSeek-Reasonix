@@ -22,6 +22,9 @@ func RebuildDerivedState(target string) ([]string, error) {
 		return nil, err
 	}
 	defer unlockTransaction()
+	if err := reconcilePreparedRepairTransaction(); err != nil {
+		return nil, fmt.Errorf("rebuild derived state: reconcile pending mutation: %w", err)
+	}
 	unlock, err := lockRepairMutations(paths...)
 	if err != nil {
 		return nil, err
@@ -30,10 +33,14 @@ func RebuildDerivedState(target string) ([]string, error) {
 	if err := verifyRepairPlanFileStates(expectedStates); err != nil {
 		return nil, err
 	}
-	return rebuildDerivedStateBoundUnlocked(target, expectedStates)
+	return rebuildDerivedStateBoundUnlocked(target, expectedStates, nil)
 }
 
-func rebuildDerivedStateBoundUnlocked(target string, expectedStates map[string]string) ([]string, error) {
+func rebuildDerivedStateBoundUnlocked(
+	target string,
+	expectedStates map[string]string,
+	planTx *RepairTransaction,
+) ([]string, error) {
 	target = strings.ToLower(strings.TrimSpace(target))
 	paths := derivedStatePaths()
 	var names []string
@@ -49,7 +56,10 @@ func rebuildDerivedStateBoundUnlocked(target string, expectedStates map[string]s
 	}
 	stamp := time.Now().UTC().Format("20060102T150405Z")
 	applied := []string{}
-	tx := newRepairTransaction(time.Now())
+	tx := planTx
+	if tx == nil {
+		tx = newRepairTransaction(time.Now())
+	}
 	for _, name := range names {
 		path := paths[name]
 		if path == "" {
@@ -69,22 +79,16 @@ func rebuildDerivedStateBoundUnlocked(target string, expectedStates map[string]s
 			return applied, err
 		}
 		quarantine := path + ".reasonix-rebuild-" + stamp
+		changeIndex := len(tx.Changes)
+		tx.Changes = append(tx.Changes, preparedRepairChangeForPrevious("derived:"+name, path, quarantine))
+		if err := persistPreparedRepairTransaction(tx); err != nil {
+			return applied, fmt.Errorf("prepare derived-state quarantine: %w", err)
+		}
+		repairMutationAfterPrepare(path)
 		if err := renameRepairNodeNoReplace(path, quarantine); err != nil {
 			return applied, err
 		}
 		repairMutationAfterRename(path)
-		if _, err := os.Lstat(path); err == nil {
-			// Confirmed state was already isolated. Persist the move so undo
-			// restores it and keeps the concurrent rewrite as a redo copy.
-			tx.Changes = append(tx.Changes, repairChangeForPrevious("derived:"+name, path, quarantine))
-			if persistErr := persistRepairTransaction(tx); persistErr != nil {
-				return applied, fmt.Errorf("repair plan preview changed since confirmation; target was recreated during quarantine; confirmed state remains at %s; record undo: %v", quarantine, persistErr)
-			}
-			appendRepairLogBestEffort(tx)
-			return applied, fmt.Errorf("repair plan preview changed since confirmation; target was recreated during quarantine; confirmed state remains at %s", quarantine)
-		} else if !os.IsNotExist(err) {
-			return applied, err
-		}
 		if expected := expectedStates[path]; expected != "" {
 			if err := verifyRepairPlanStateIDFor(quarantine, path, expected); err != nil {
 				if restoreErr := restoreRepairNodeIfAbsent(quarantine, path); restoreErr != nil {
@@ -93,14 +97,23 @@ func rebuildDerivedStateBoundUnlocked(target string, expectedStates map[string]s
 				return applied, err
 			}
 		}
-		applied = append(applied, quarantine)
-		tx.Changes = append(tx.Changes, repairChangeForPrevious("derived:"+name, path, quarantine))
-		if err := persistRepairTransaction(tx); err != nil {
-			if restoreErr := restoreRepairNodeIfAbsent(quarantine, path); restoreErr != nil {
-				return applied, fmt.Errorf("%w; confirmed derived state retained at %s: %v", err, quarantine, restoreErr)
+		if durable, err := commitPreparedRepairTransaction(tx, changeIndex); err != nil {
+			if durable {
+				return applied, fmt.Errorf("commit derived-state undo state: cleanup pending journal: %w", err)
 			}
+			restoreErr := restoreRepairNodeIfAbsent(quarantine, path)
+			if restoreErr != nil {
+				return applied, fmt.Errorf("commit derived-state undo state: %w; confirmed state retained at %s: %v", err, quarantine, restoreErr)
+			}
+			return applied, fmt.Errorf("commit derived-state undo state: %w", err)
+		}
+		if _, err := os.Lstat(path); err == nil {
+			appendRepairLogBestEffort(tx)
+			return applied, fmt.Errorf("repair plan preview changed since confirmation; target was recreated during quarantine; confirmed state remains at %s", quarantine)
+		} else if !os.IsNotExist(err) {
 			return applied, err
 		}
+		applied = append(applied, quarantine)
 	}
 	if len(tx.Changes) > 0 {
 		appendRepairLogBestEffort(tx)

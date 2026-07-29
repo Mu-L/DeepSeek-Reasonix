@@ -385,8 +385,21 @@ jobs:
             -TimeoutSeconds 1800 `
             -WaitForExternalApproval:$waitForExternalApproval
 
+      - name: Bind signed Windows payload to release manifest
+        if: runner.os == 'Windows' && env.HAS_SIGNPATH == 'true'
+        working-directory: desktop
+        env:
+          MINISIGN_PRIVATE_KEY: ${{ secrets.MINISIGN_PRIVATE_KEY }}
+          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
+        run: |
+          go run ./cmd/sign windows-payload ../signed-payload "${{ steps.ver.outputs.version }}"
+          go run ./cmd/sign sign ../signed-payload/reasonix-payload.json
+          go run ./cmd/sign verify ../signed-payload/reasonix-payload.json
+
       - name: Rebuild Windows packages from signed payload
         if: runner.os == 'Windows' && env.HAS_SIGNPATH == 'true'
+        env:
+          REASONIX_REQUIRE_PAYLOAD_MANIFEST: "1"
         run: scripts/package-windows-desktop.sh "${{ matrix.platform == 'windows/arm64' && 'arm64' || 'amd64' }}" signed-payload
 
       # The second request signs the rebuilt NSIS container. Release signing

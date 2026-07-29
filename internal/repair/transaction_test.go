@@ -1,6 +1,7 @@
 package repair
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,67 @@ import (
 
 	"reasonix/internal/config"
 )
+
+func TestReadLastRepairAcceptsLegacyTransactionWithoutJournalFields(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("REASONIX_HOME", home)
+	target := filepath.Join(home, "desktop-window.json")
+	previous := target + ".reasonix-rebuild-20260729T000000Z"
+	legacy := map[string]any{
+		"schemaVersion": 1,
+		"id":            "repair-legacy",
+		"createdAt":     "2026-07-29T00:00:00Z",
+		"changes": []map[string]any{{
+			"scope":           "derived:window",
+			"targetPath":      target,
+			"previousPath":    previous,
+			"previousStateId": strings.Repeat("a", 64),
+		}},
+	}
+	b, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(repairTransactionPath()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(repairTransactionPath(), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := ReadLastRepair()
+	if err != nil || tx.ID != "repair-legacy" || len(tx.Changes) != 1 {
+		t.Fatalf("legacy transaction = %+v, %v", tx, err)
+	}
+}
+
+func TestReadLastRepairRejectsPendingOnlyJournalFields(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("REASONIX_HOME", home)
+	target := filepath.Join(home, "desktop-window.json")
+	tx := newRepairTransaction(time.Now())
+	tx.PreparedLastRepairStateID = strings.Repeat("a", 64)
+	tx.Changes = []RepairChange{{
+		Scope:           "derived:window",
+		TargetPath:      target,
+		PreviousPath:    target + ".reasonix-rebuild-20260729T000000Z",
+		PreviousStateID: strings.Repeat("b", 64),
+		Prepared:        true,
+	}}
+	b, err := json.Marshal(tx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(repairTransactionPath()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(repairTransactionPath(), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadLastRepair(); err == nil ||
+		!strings.Contains(err.Error(), "pending-only state") {
+		t.Fatalf("ReadLastRepair error = %v", err)
+	}
+}
 
 // TestUndoLastRepairKeepsBackupUntilProgressPersisted pins the crash-window
 // contract: a change that was fully restored but whose progress record never

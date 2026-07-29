@@ -109,11 +109,11 @@ func TestRunHoldsReleaseUnitLockAcrossInstallerHandoff(t *testing.T) {
 		events = append(events, "claim:"+strings.Join([]string{toVersion, createdAt, transactionID, launcherPath, strings.Join(paths, "\x00")}, "\x01"))
 		return &repair.UpdateTransaction{}, func() { events = append(events, "release") }, nil
 	}
-	installStagedReleaseUnitFn = func(*repair.UpdateTransaction, string) (bool, error) {
+	installStagedReleaseUnitFn = func(*repair.UpdateTransaction, string) (bool, []repair.FileUpdateInstallReceipt, error) {
 		events = append(events, "publish")
-		return true, nil
+		return true, nil, nil
 	}
-	recordInstalledUpdateFn = func(tx *repair.UpdateTransaction) (*repair.UpdateTransaction, error) {
+	recordInstalledUpdateFn = func(tx *repair.UpdateTransaction, _ ...repair.FileUpdateInstallReceipt) (*repair.UpdateTransaction, error) {
 		events = append(events, "record-installed")
 		return tx, nil
 	}
@@ -295,10 +295,10 @@ func TestRunTreatsInstalledReleaseUnitRecordingFailureAsApplyFailure(t *testing.
 	claimInstallerExecutionFn = func(string, string) (func(), error) {
 		return func() {}, nil
 	}
-	installStagedReleaseUnitFn = func(*repair.UpdateTransaction, string) (bool, error) {
-		return true, nil
+	installStagedReleaseUnitFn = func(*repair.UpdateTransaction, string) (bool, []repair.FileUpdateInstallReceipt, error) {
+		return true, nil, nil
 	}
-	recordInstalledUpdateFn = func(*repair.UpdateTransaction) (*repair.UpdateTransaction, error) {
+	recordInstalledUpdateFn = func(*repair.UpdateTransaction, ...repair.FileUpdateInstallReceipt) (*repair.UpdateTransaction, error) {
 		return nil, errors.New("release unit drifted")
 	}
 	transactionID := repair.UpdateTransactionID(claimed)

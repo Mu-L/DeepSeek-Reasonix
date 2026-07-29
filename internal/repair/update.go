@@ -69,6 +69,16 @@ type installedFileUpdateState struct {
 	InstalledStateIDs   []string `json:"installedStateIds"`
 }
 
+// FileUpdateInstallReceipt binds one published release-unit member to the exact
+// transaction, target, node type, mode, and bytes that were staged and verified.
+// RecordClaimedFileUpdateInstalled accepts only these receipts, so a replacement
+// that appears after publish verification cannot be adopted by the transaction.
+type FileUpdateInstallReceipt struct {
+	UpdateTransactionID string
+	TargetPath          string
+	InstalledStateID    string
+}
+
 type UpdateRollbackResult struct {
 	RolledBack  bool   `json:"rolledBack"`
 	FromVersion string `json:"fromVersion,omitempty"`
@@ -637,15 +647,28 @@ func verifyPreparedFileUpdateBackups(tx *UpdateTransaction) error {
 // A concurrent recreation after the prepared node moves aside wins; the new
 // bytes and the verified prior node remain staged for recovery.
 func PublishClaimedFileUpdateMember(claimed *UpdateTransaction, targetPath string, content []byte, mode os.FileMode) error {
+	_, err := PublishClaimedFileUpdateMemberExact(claimed, targetPath, content, mode)
+	return err
+}
+
+// PublishClaimedFileUpdateMemberExact returns proof of the exact node it
+// published. Callers must retain every receipt and pass them to
+// RecordClaimedFileUpdateInstalled before releasing the update claim.
+func PublishClaimedFileUpdateMemberExact(
+	claimed *UpdateTransaction,
+	targetPath string,
+	content []byte,
+	mode os.FileMode,
+) (FileUpdateInstallReceipt, error) {
 	if claimed == nil || claimed.TargetKind != "file" {
-		return fmt.Errorf("publish file update: transaction identity is incomplete")
+		return FileUpdateInstallReceipt{}, fmt.Errorf("publish file update: transaction identity is incomplete")
 	}
 	current, err := readPendingUpdateForLauncher(claimed.TargetPath)
 	if err != nil {
-		return fmt.Errorf("publish file update: read pending transaction: %w", err)
+		return FileUpdateInstallReceipt{}, fmt.Errorf("publish file update: read pending transaction: %w", err)
 	}
 	if !reflect.DeepEqual(claimed, current) {
-		return fmt.Errorf("publish file update: pending transaction changed")
+		return FileUpdateInstallReceipt{}, fmt.Errorf("publish file update: pending transaction changed")
 	}
 	targetPath = filepath.Clean(strings.TrimSpace(targetPath))
 	targetKey := canonicalRepairPath(targetPath)
@@ -657,26 +680,26 @@ func PublishClaimedFileUpdateMember(claimed *UpdateTransaction, targetPath strin
 		}
 	}
 	if targetKey == "" || member == nil {
-		return fmt.Errorf("publish file update: target is outside the claimed release unit")
+		return FileUpdateInstallReceipt{}, fmt.Errorf("publish file update: target is outside the claimed release unit")
 	}
 	preparedState := ""
 	if !member.MissingBefore {
 		if err := verifyUpdateFileMatchesPrepared(*member); err != nil {
-			return fmt.Errorf("publish file update: %w", err)
+			return FileUpdateInstallReceipt{}, fmt.Errorf("publish file update: %w", err)
 		}
 		if err := verifyUpdateBackupFile(*member); err != nil {
-			return fmt.Errorf("publish file update: %w", err)
+			return FileUpdateInstallReceipt{}, fmt.Errorf("publish file update: %w", err)
 		}
 		preparedState = repairPlanReleaseNodeState(member.TargetPath)
 	} else if _, err := os.Lstat(member.TargetPath); err == nil {
-		return fmt.Errorf("publish file update: prepared release file %s appeared after backup", filepath.Base(member.TargetPath))
+		return FileUpdateInstallReceipt{}, fmt.Errorf("publish file update: prepared release file %s appeared after backup", filepath.Base(member.TargetPath))
 	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("publish file update: inspect prepared release file %s: %w", filepath.Base(member.TargetPath), err)
+		return FileUpdateInstallReceipt{}, fmt.Errorf("publish file update: inspect prepared release file %s: %w", filepath.Base(member.TargetPath), err)
 	}
 
-	stage, expectedHash, err := stageFileUpdateContent(member.TargetPath, content, mode)
+	stage, expectedHash, installedStateID, err := stageFileUpdateContent(member.TargetPath, content, mode)
 	if err != nil {
-		return fmt.Errorf("publish file update: stage %s: %w", filepath.Base(member.TargetPath), err)
+		return FileUpdateInstallReceipt{}, fmt.Errorf("publish file update: stage %s: %w", filepath.Base(member.TargetPath), err)
 	}
 	stagePublished := false
 	defer func() {
@@ -689,54 +712,58 @@ func PublishClaimedFileUpdateMember(claimed *UpdateTransaction, targetPath strin
 	if !member.MissingBefore {
 		transactionID := UpdateTransactionID(claimed)
 		if len(transactionID) < 16 {
-			return fmt.Errorf("publish file update: transaction identity is incomplete")
+			return FileUpdateInstallReceipt{}, fmt.Errorf("publish file update: transaction identity is incomplete")
 		}
 		retained = member.TargetPath + ".reasonix-update-aside-" + transactionID[:16]
 		if err := renameRepairNodeNoReplace(member.TargetPath, retained); err != nil {
-			return fmt.Errorf("publish file update: retain %s: %w", filepath.Base(member.TargetPath), err)
+			return FileUpdateInstallReceipt{}, fmt.Errorf("publish file update: retain %s: %w", filepath.Base(member.TargetPath), err)
 		}
 		fileUpdateAfterRetain(member.TargetPath, retained)
 		if err := verifyRepairPlanReleaseNodeStateFor(retained, member.TargetPath, preparedState); err != nil {
 			if restoreErr := restoreRepairNodeIfAbsent(retained, member.TargetPath); restoreErr != nil {
-				return fmt.Errorf("%w; verified prior release file retained at %s: %v", err, retained, restoreErr)
+				return FileUpdateInstallReceipt{}, fmt.Errorf("%w; verified prior release file retained at %s: %v", err, retained, restoreErr)
 			}
-			return fmt.Errorf("publish file update: prepared release file changed during retain: %w", err)
+			return FileUpdateInstallReceipt{}, fmt.Errorf("publish file update: prepared release file changed during retain: %w", err)
 		}
 	}
 	if err := renameRepairNodeNoReplace(stage, member.TargetPath); err != nil {
 		if retained != "" {
 			if restoreErr := restoreRepairNodeIfAbsent(retained, member.TargetPath); restoreErr != nil {
-				return fmt.Errorf("publish file update: publish %s: %w; verified prior release file retained at %s: %v", filepath.Base(member.TargetPath), err, retained, restoreErr)
+				return FileUpdateInstallReceipt{}, fmt.Errorf("publish file update: publish %s: %w; verified prior release file retained at %s: %v", filepath.Base(member.TargetPath), err, retained, restoreErr)
 			}
 		}
-		return fmt.Errorf("publish file update: publish %s: %w", filepath.Base(member.TargetPath), err)
+		return FileUpdateInstallReceipt{}, fmt.Errorf("publish file update: publish %s: %w", filepath.Base(member.TargetPath), err)
 	}
 	stagePublished = true
-	if err := verifyRegularFileHash(member.TargetPath, expectedHash); err != nil {
+	if err := verifyRepairPlanReleaseNodeStateFor(member.TargetPath, member.TargetPath, installedStateID); err != nil {
 		rejected, retainErr := moveRepairNodeToUniqueCleanup(member.TargetPath)
 		if retainErr != nil || rejected == "" {
 			if retainErr != nil {
-				return fmt.Errorf("publish file update: installed %s changed: %w; retain rejected file: %v", filepath.Base(member.TargetPath), err, retainErr)
+				return FileUpdateInstallReceipt{}, fmt.Errorf("publish file update: installed %s changed: %w; retain rejected file: %v", filepath.Base(member.TargetPath), err, retainErr)
 			}
-			return fmt.Errorf("publish file update: installed %s changed: %w; rejected file disappeared before compensation", filepath.Base(member.TargetPath), err)
+			return FileUpdateInstallReceipt{}, fmt.Errorf("publish file update: installed %s changed: %w; rejected file disappeared before compensation", filepath.Base(member.TargetPath), err)
 		}
 		if retained == "" {
-			return fmt.Errorf("publish file update: installed %s changed: %w; rejected file retained at %s", filepath.Base(member.TargetPath), err, rejected)
+			return FileUpdateInstallReceipt{}, fmt.Errorf("publish file update: installed %s changed: %w; rejected file retained at %s", filepath.Base(member.TargetPath), err, rejected)
 		}
 		if verifyErr := verifyRepairPlanReleaseNodeStateFor(retained, member.TargetPath, preparedState); verifyErr != nil {
-			return fmt.Errorf("publish file update: installed %s changed: %w; rejected file retained at %s; prepared file changed at %s: %v", filepath.Base(member.TargetPath), err, rejected, retained, verifyErr)
+			return FileUpdateInstallReceipt{}, fmt.Errorf("publish file update: installed %s changed: %w; rejected file retained at %s; prepared file changed at %s: %v", filepath.Base(member.TargetPath), err, rejected, retained, verifyErr)
 		}
 		if restoreErr := restoreRepairNodeIfAbsent(retained, member.TargetPath); restoreErr != nil {
-			return fmt.Errorf("publish file update: installed %s changed: %w; rejected file retained at %s; restore prepared file: %v", filepath.Base(member.TargetPath), err, rejected, restoreErr)
+			return FileUpdateInstallReceipt{}, fmt.Errorf("publish file update: installed %s changed: %w; rejected file retained at %s; restore prepared file: %v", filepath.Base(member.TargetPath), err, rejected, restoreErr)
 		}
-		return fmt.Errorf("publish file update: installed %s changed: %w; rejected file retained at %s and prepared file restored", filepath.Base(member.TargetPath), err, rejected)
+		return FileUpdateInstallReceipt{}, fmt.Errorf("publish file update: installed %s changed: %w; rejected file retained at %s and prepared file restored", filepath.Base(member.TargetPath), err, rejected)
 	}
 	if retained != "" {
 		_ = removeUpdateNodeMatching(retained, func(moved string) error {
 			return verifyRepairPlanReleaseNodeStateFor(moved, member.TargetPath, preparedState)
 		}, false)
 	}
-	return nil
+	return FileUpdateInstallReceipt{
+		UpdateTransactionID: UpdateTransactionID(current),
+		TargetPath:          member.TargetPath,
+		InstalledStateID:    installedStateID,
+	}, nil
 }
 
 func verifyUpdateFileMatchesPrepared(f UpdateTransactionFile) error {
@@ -785,16 +812,16 @@ func verifyRegularFileHash(path, expected string) error {
 	return nil
 }
 
-func stageFileUpdateContent(targetPath string, content []byte, mode os.FileMode) (string, string, error) {
+func stageFileUpdateContent(targetPath string, content []byte, mode os.FileMode) (string, string, string, error) {
 	tmp, err := os.CreateTemp(filepath.Dir(targetPath), "."+filepath.Base(targetPath)+".reasonix-update-stage-*")
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	path := tmp.Name()
-	cleanup := func(err error) (string, string, error) {
+	cleanup := func(err error) (string, string, string, error) {
 		_ = tmp.Close()
 		_ = os.Remove(path)
-		return "", "", err
+		return "", "", "", err
 	}
 	if _, err := tmp.Write(content); err != nil {
 		return cleanup(err)
@@ -805,12 +832,24 @@ func stageFileUpdateContent(targetPath string, content []byte, mode os.FileMode)
 	if err := tmp.Chmod(mode); err != nil {
 		return cleanup(err)
 	}
+	info, err := tmp.Stat()
+	if err != nil {
+		return cleanup(err)
+	}
+	installedStateID := repairPlanReadStateIDFor(
+		targetPath,
+		info.Mode(),
+		"file",
+		"",
+		content,
+		true,
+	)
 	if err := tmp.Close(); err != nil {
 		_ = os.Remove(path)
-		return "", "", err
+		return "", "", "", err
 	}
 	sum := sha256.Sum256(content)
-	return path, hex.EncodeToString(sum[:]), nil
+	return path, hex.EncodeToString(sum[:]), installedStateID, nil
 }
 
 // RecordClaimedFileUpdateInstalled binds the complete post-install release unit
@@ -818,7 +857,10 @@ func stageFileUpdateContent(targetPath string, content []byte, mode os.FileMode)
 // The binding is a transaction-unique create-only sidecar: pending-update.json
 // stays immutable, so a process crash can never strand rollback state in the
 // gap between displacing the old pending file and publishing a replacement.
-func RecordClaimedFileUpdateInstalled(claimed *UpdateTransaction) (*UpdateTransaction, error) {
+func RecordClaimedFileUpdateInstalled(
+	claimed *UpdateTransaction,
+	receipts ...FileUpdateInstallReceipt,
+) (*UpdateTransaction, error) {
 	if claimed == nil || claimed.TargetKind != "file" {
 		return nil, fmt.Errorf("record installed update: transaction identity is incomplete")
 	}
@@ -837,8 +879,35 @@ func RecordClaimedFileUpdateInstalled(claimed *UpdateTransaction) (*UpdateTransa
 		UpdateTransactionID: UpdateTransactionID(current),
 		InstalledStateIDs:   make([]string, len(current.Files)),
 	}
+	receiptStates := make(map[string]string, len(receipts))
+	for _, receipt := range receipts {
+		if strings.TrimSpace(receipt.UpdateTransactionID) != record.UpdateTransactionID {
+			return nil, fmt.Errorf("record installed update: publish receipt belongs to a different transaction")
+		}
+		targetKey := canonicalRepairPath(receipt.TargetPath)
+		if targetKey == "" {
+			return nil, fmt.Errorf("record installed update: publish receipt target is invalid")
+		}
+		stateID := strings.TrimSpace(receipt.InstalledStateID)
+		if len(stateID) != sha256.Size*2 {
+			return nil, fmt.Errorf("record installed update: publish receipt state is invalid")
+		}
+		if _, err := hex.DecodeString(stateID); err != nil {
+			return nil, fmt.Errorf("record installed update: publish receipt state is invalid")
+		}
+		if _, exists := receiptStates[targetKey]; exists {
+			return nil, fmt.Errorf("record installed update: duplicate publish receipt")
+		}
+		receiptStates[targetKey] = stateID
+	}
 	for i := range current.Files {
 		f := &current.Files[i]
+		targetKey := canonicalRepairPath(f.TargetPath)
+		if stateID, ok := receiptStates[targetKey]; ok {
+			record.InstalledStateIDs[i] = stateID
+			delete(receiptStates, targetKey)
+			continue
+		}
 		info, statErr := os.Lstat(f.TargetPath)
 		if statErr != nil {
 			if os.IsNotExist(statErr) && f.MissingBefore {
@@ -850,7 +919,10 @@ func RecordClaimedFileUpdateInstalled(claimed *UpdateTransaction) (*UpdateTransa
 		if !info.Mode().IsRegular() {
 			return nil, fmt.Errorf("record installed update: %s is not a regular file", filepath.Base(f.TargetPath))
 		}
-		record.InstalledStateIDs[i] = repairPlanReleaseNodeState(f.TargetPath)
+		return nil, fmt.Errorf("record installed update: publish receipt is missing for %s", filepath.Base(f.TargetPath))
+	}
+	if len(receiptStates) != 0 {
+		return nil, fmt.Errorf("record installed update: publish receipt target is outside the release unit")
 	}
 	for i, f := range current.Files {
 		if err := verifyRepairPlanReleaseNodeStateFor(f.TargetPath, f.TargetPath, record.InstalledStateIDs[i]); err != nil {
@@ -1380,8 +1452,15 @@ func ClearClaimedAppBundleUpdateHandoff(claimed *UpdateTransaction) error {
 	return nil
 }
 
+// WritePendingUpdate is retained for source compatibility with older repair
+// callers. Pending transactions are immutable once created; callers that need
+// to start an update should use the prepare APIs, and callers that need to
+// transition one must use the exact transaction helpers below.
+//
+// Deprecated: this function only creates a pending transaction and refuses to
+// replace an existing one.
 func WritePendingUpdate(tx *UpdateTransaction) error {
-	return writePendingUpdate(tx, false)
+	return createPendingUpdate(tx)
 }
 
 func createPendingUpdate(tx *UpdateTransaction) error {
@@ -2321,8 +2400,7 @@ func restoreReleaseUnit(
 		if st, statErr := os.Stat(f.TargetPath); statErr == nil {
 			mode = st.Mode().Perm()
 		}
-		stage := f.TargetPath + ".reasonix-rollback-stage"
-		stagedSHA256, copyErr := rollbackStageCopy(f.BackupPath, stage, mode)
+		stage, stagedSHA256, copyErr := stageUpdateRollbackBackup(f, mode)
 		if copyErr != nil {
 			return false, fmt.Errorf("stage %s: %w", filepath.Base(f.TargetPath), copyErr)
 		}
@@ -2582,6 +2660,29 @@ func restoreReleaseUnit(
 	return mixed, swapErr
 }
 
+func stageUpdateRollbackBackup(
+	file UpdateTransactionFile,
+	mode os.FileMode,
+) (string, string, error) {
+	for attempt := 0; attempt < 16; attempt++ {
+		stage := fmt.Sprintf(
+			"%s.reasonix-rollback-stage-%d-%d",
+			file.TargetPath,
+			time.Now().UTC().UnixNano(),
+			attempt,
+		)
+		stagedSHA256, err := rollbackStageCopy(file.BackupPath, stage, mode)
+		if err == nil {
+			return stage, stagedSHA256, nil
+		}
+		if os.IsExist(err) {
+			continue
+		}
+		return "", "", err
+	}
+	return "", "", fmt.Errorf("cannot allocate rollback staging path")
+}
+
 // allowedUpdateTargetBase whitelists the packaged binaries an update
 // transaction may name. The main executable names are only valid as the
 // primary target; Guard/launcher artifacts only as release-unit siblings.
@@ -2590,7 +2691,7 @@ func allowedUpdateTargetBase(base string, primary bool) bool {
 	case "reasonix-desktop", "reasonix-desktop.exe":
 		return primary
 	case "reasonix.exe":
-		return true
+		return !primary
 	case "reasonix", "reasonix-guard", "reasonix-guard.exe", "reasonix-launcher.exe", "reasonix-update-helper.exe", "reasonix-cli.exe":
 		return !primary
 	default:
@@ -2808,11 +2909,18 @@ func copyFileWithHashCreate(src, dst string, mode os.FileMode) (string, error) {
 }
 
 func copyFileWithHashMode(src, dst string, mode os.FileMode, createOnly bool) (string, error) {
-	in, err := os.Open(src)
+	in, err := openRepairRegularRead(src)
 	if err != nil {
 		return "", err
 	}
 	defer in.Close()
+	info, err := in.Stat()
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("source %s is not a regular file", filepath.Base(src))
+	}
 	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
 		return "", err
 	}

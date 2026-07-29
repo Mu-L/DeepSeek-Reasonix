@@ -14,6 +14,9 @@
 //	                             size + sha256, and write <dir>/latest.json with GitHub
 //	                             release download URLs. The R2 mirror step rewrites those
 //	                             URLs to the CDN afterwards (url + sig fields together).
+//
+//	windows-payload <dir> <ver> Write a deterministic manifest of the exact
+//	                             executables embedded in the Windows installer.
 package main
 
 import (
@@ -50,6 +53,11 @@ func main() {
 			usage()
 		}
 		err = genManifest(os.Args[2], os.Args[3], os.Args[4])
+	case "windows-payload":
+		if len(os.Args) != 4 {
+			usage()
+		}
+		err = genWindowsPayloadManifest(os.Args[2], os.Args[3])
 	case "genkey":
 		if len(os.Args) != 3 {
 			usage()
@@ -70,8 +78,32 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage:\n  sign <file>...\n  manifest <dir> <version> <tag>\n  genkey <dir>\n  verify <file>")
+	fmt.Fprintln(os.Stderr, "usage:\n  sign <file>...\n  manifest <dir> <version> <tag>\n  windows-payload <dir> <version>\n  genkey <dir>\n  verify <file>")
 	os.Exit(2)
+}
+
+func genWindowsPayloadManifest(dir, version string) error {
+	hashes := make(map[string]string)
+	for _, name := range update.WindowsPayloadFileNames() {
+		path := filepath.Join(dir, name)
+		info, err := os.Lstat(path)
+		if err != nil {
+			return fmt.Errorf("Windows payload %s: %w", name, err)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("Windows payload %s is not a regular file", name)
+		}
+		_, sum, err := hashFile(path)
+		if err != nil {
+			return err
+		}
+		hashes[name] = sum
+	}
+	b, err := update.EncodeWindowsPayloadManifest(version, hashes)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, update.WindowsPayloadManifestName), b, 0o644)
 }
 
 // verifyFile checks <file> against <file>.minisig using the embedded public key —

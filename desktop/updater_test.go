@@ -505,6 +505,60 @@ func TestExtractBinary(t *testing.T) {
 	}
 }
 
+func TestExtractLinuxReleaseUnitRejectsAmbiguousMembers(t *testing.T) {
+	makeArchive := func(t *testing.T, headers []tar.Header, bodies [][]byte) []byte {
+		t.Helper()
+		var buf bytes.Buffer
+		gz := gzip.NewWriter(&buf)
+		tw := tar.NewWriter(gz)
+		for i, header := range headers {
+			if err := tw.WriteHeader(&header); err != nil {
+				t.Fatal(err)
+			}
+			if i < len(bodies) {
+				if _, err := tw.Write(bodies[i]); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		if err := tw.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := gz.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return buf.Bytes()
+	}
+	base := func(name string, body []byte) tar.Header {
+		return tar.Header{Name: name, Mode: 0o755, Size: int64(len(body)), Typeflag: tar.TypeReg}
+	}
+	headers := []tar.Header{
+		base("reasonix-desktop", []byte("desktop")),
+		base("reasonix-guard", []byte("guard")),
+		base("reasonix", []byte("cli")),
+	}
+	bodies := [][]byte{[]byte("desktop"), []byte("guard"), []byte("cli")}
+	if got, err := extractLinuxReleaseUnit(makeArchive(t, headers, bodies)); err != nil ||
+		string(got["reasonix-desktop"]) != "desktop" {
+		t.Fatalf("complete release extraction = %v, %q", err, got["reasonix-desktop"])
+	}
+
+	duplicateHeaders := append(append([]tar.Header(nil), headers...), base("nested/reasonix", []byte("duplicate")))
+	duplicateBodies := append(append([][]byte(nil), bodies...), []byte("duplicate"))
+	if _, err := extractLinuxReleaseUnit(makeArchive(t, duplicateHeaders, duplicateBodies)); err == nil ||
+		!strings.Contains(err.Error(), "appears more than once") {
+		t.Fatalf("duplicate release member error = %v", err)
+	}
+
+	nonRegular := append([]tar.Header(nil), headers...)
+	nonRegular[1] = tar.Header{Name: "reasonix-guard", Typeflag: tar.TypeSymlink, Linkname: "outside"}
+	nonRegularBodies := [][]byte{bodies[0], nil, bodies[2]}
+	if _, err := extractLinuxReleaseUnit(makeArchive(t, nonRegular, nonRegularBodies)); err == nil ||
+		!strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("non-regular release member error = %v", err)
+	}
+}
+
 func TestApplyLinuxHoldsReleaseUnitLockDuringReplace(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("REASONIX_HOME", t.TempDir())
@@ -524,10 +578,14 @@ func TestApplyLinuxHoldsReleaseUnitLockDuringReplace(t *testing.T) {
 	currentExecutablePathForLinux = func() string { return exe }
 	entered := make(chan struct{})
 	releaseReplace := make(chan struct{})
-	applyLinuxReleaseUnit = func(*repair.UpdateTransaction, string, []byte, []byte, []byte) error {
+	applyLinuxReleaseUnit = func(
+		tx *repair.UpdateTransaction,
+		exe string,
+		bin, guard, cli []byte,
+	) ([]repair.FileUpdateInstallReceipt, error) {
 		close(entered)
 		<-releaseReplace
-		return nil
+		return originalApply(tx, exe, bin, guard, cli)
 	}
 	t.Cleanup(func() {
 		currentExecutablePathForLinux = originalPath

@@ -151,7 +151,7 @@ func run(args []string) int {
 		logger.Printf("extract installer payload: %v", installerErr)
 		return recoverUnstarted()
 	}
-	publishStarted, err := installStagedReleaseUnitFn(claimed, stagingDir)
+	publishStarted, receipts, err := installStagedReleaseUnitFn(claimed, stagingDir)
 	if err != nil {
 		logger.Printf("publish staged release unit: %v", err)
 		if !publishStarted {
@@ -167,7 +167,7 @@ func run(args []string) int {
 		}
 		return 1
 	}
-	if _, err := recordInstalledUpdateFn(claimed); err != nil {
+	if _, err := recordInstalledUpdateFn(claimed, receipts...); err != nil {
 		logger.Printf("record installed release unit: %v", err)
 		if markErr := repair.MarkUpdateApplyFailedExact(claimed, err.Error()); markErr != nil {
 			logger.Printf("record install failure: %v", markErr)
@@ -324,21 +324,25 @@ func claimVerifiedInstallerForExecution(path, expectedSHA256 string) (func(), er
 	}, nil
 }
 
-func installStagedWindowsReleaseUnit(claimed *repair.UpdateTransaction, stagingDir string) (bool, error) {
+func installStagedWindowsReleaseUnit(
+	claimed *repair.UpdateTransaction,
+	stagingDir string,
+) (bool, []repair.FileUpdateInstallReceipt, error) {
 	members, err := loadWindowsStagedReleaseUnit(claimed, stagingDir)
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
 	// Persist recovery intent before the first live rename. If the helper exits
 	// between release-unit members, Guard rolls the exact pending transaction
 	// back instead of launching a mixed install.
 	if err := repair.MarkUpdateApplyFailedExact(claimed, "Windows update publish did not complete"); err != nil {
-		return false, fmt.Errorf("record update recovery intent: %w", err)
+		return false, nil, fmt.Errorf("record update recovery intent: %w", err)
 	}
-	if err := publishLoadedFileUpdateReleaseUnit(claimed, members, repair.PublishClaimedFileUpdateMember); err != nil {
-		return true, err
+	receipts, err := publishLoadedFileUpdateReleaseUnit(claimed, members, repair.PublishClaimedFileUpdateMemberExact)
+	if err != nil {
+		return true, receipts, err
 	}
-	return true, nil
+	return true, receipts, nil
 }
 
 func windowsReleaseUnitPaths(installDir string) []string {

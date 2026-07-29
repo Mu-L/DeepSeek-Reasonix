@@ -13,6 +13,25 @@ import (
 	"time"
 )
 
+func fileUpdateInstallReceiptsForTest(t *testing.T, tx *UpdateTransaction) []FileUpdateInstallReceipt {
+	t.Helper()
+	receipts := make([]FileUpdateInstallReceipt, 0, len(tx.Files))
+	for _, file := range tx.Files {
+		if _, err := os.Lstat(file.TargetPath); err != nil {
+			if os.IsNotExist(err) && file.MissingBefore {
+				continue
+			}
+			t.Fatalf("inspect installed test release member %s: %v", file.TargetPath, err)
+		}
+		receipts = append(receipts, FileUpdateInstallReceipt{
+			UpdateTransactionID: UpdateTransactionID(tx),
+			TargetPath:          file.TargetPath,
+			InstalledStateID:    repairPlanReleaseNodeState(file.TargetPath),
+		})
+	}
+	return receipts
+}
+
 func TestFileUpdateRollbackRestoresPreviousBinary(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("REASONIX_HOME", home)
@@ -374,7 +393,7 @@ func TestLegacyAppBundleRollbackWithoutTreeDigest(t *testing.T) {
 		t.Fatal(err)
 	}
 	tx.BackupTreeID = ""
-	if err := WritePendingUpdate(tx); err != nil {
+	if err := overwritePendingUpdateForTest(tx); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Rename(app, backup); err != nil {
@@ -422,7 +441,7 @@ func TestRepairPlanCanConfirmLegacyAppBundleRollbackWithoutTreeDigest(t *testing
 		t.Fatal(err)
 	}
 	tx.BackupTreeID = ""
-	if err := WritePendingUpdate(tx); err != nil {
+	if err := overwritePendingUpdateForTest(tx); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Rename(app, backup); err != nil {
@@ -484,7 +503,7 @@ func TestRepairPlanRejectsLegacyAppBundleSymlinkBackupBeforeMutation(t *testing.
 		t.Fatal(err)
 	}
 	tx.BackupTreeID = ""
-	if err := WritePendingUpdate(tx); err != nil {
+	if err := overwritePendingUpdateForTest(tx); err != nil {
 		t.Fatal(err)
 	}
 	external := filepath.Join(dir, "external-backup")
@@ -764,7 +783,7 @@ func TestExactUpdateTransitionsIgnoreLaterSameVersionTransaction(t *testing.T) {
 		}
 		second := *first
 		second.CreatedAt = time.Now().UTC().Add(time.Second).Format(time.RFC3339Nano)
-		if err := WritePendingUpdate(&second); err != nil {
+		if err := overwritePendingUpdateForTest(&second); err != nil {
 			t.Fatal(err)
 		}
 		if err := CancelPendingUpdateMatching(first.ToVersion, first.CreatedAt); err != nil {
@@ -797,10 +816,10 @@ func TestExactUpdateTransitionsIgnoreLaterSameVersionTransaction(t *testing.T) {
 		}
 		second := *first
 		second.CreatedAt = time.Now().UTC().Add(time.Second).Format(time.RFC3339Nano)
-		if err := WritePendingUpdate(&second); err != nil {
+		if err := overwritePendingUpdateForTest(&second); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := RecordClaimedFileUpdateInstalled(&second); err != nil {
+		if _, err := RecordClaimedFileUpdateInstalled(&second, fileUpdateInstallReceiptsForTest(t, &second)...); err != nil {
 			t.Fatal(err)
 		}
 		if err := MarkUpdateHealthyMatching("v2", first.CreatedAt); err != nil {
@@ -839,7 +858,7 @@ func TestExactUpdateTransitionsIgnoreLaterSameVersionTransaction(t *testing.T) {
 		}
 		second := *first
 		second.CreatedAt = time.Now().UTC().Add(time.Second).Format(time.RFC3339Nano)
-		if err := WritePendingUpdate(&second); err != nil {
+		if err := overwritePendingUpdateForTest(&second); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.WriteFile(target, []byte("new"), 0o700); err != nil {
@@ -888,7 +907,7 @@ func TestUpdateTransitionsRecheckPendingAfterTargetLock(t *testing.T) {
 		var once sync.Once
 		repairMutationBeforeLock = func([]string) {
 			once.Do(func() {
-				if err := WritePendingUpdate(&changed); err != nil {
+				if err := overwritePendingUpdateForTest(&changed); err != nil {
 					t.Fatal(err)
 				}
 			})
@@ -936,7 +955,7 @@ func TestUpdateTransitionsRecheckPendingAfterTargetLock(t *testing.T) {
 		var once sync.Once
 		repairMutationBeforeLock = func([]string) {
 			once.Do(func() {
-				if err := WritePendingUpdate(&changed); err != nil {
+				if err := overwritePendingUpdateForTest(&changed); err != nil {
 					t.Fatal(err)
 				}
 			})
@@ -979,7 +998,7 @@ func TestGenericUpdateTransitionsBindPendingBeforeWaitingForLock(t *testing.T) {
 		replacement.FromVersion = "replacement"
 		originalAcquire := acquirePendingUpdateLock
 		acquirePendingUpdateLock = func() (func(), error) {
-			if err := WritePendingUpdate(&replacement); err != nil {
+			if err := overwritePendingUpdateForTest(&replacement); err != nil {
 				t.Fatal(err)
 			}
 			return func() {}, nil
@@ -1014,14 +1033,14 @@ func TestGenericUpdateTransitionsBindPendingBeforeWaitingForLock(t *testing.T) {
 		if err := os.WriteFile(target, []byte("new"), 0o700); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := RecordClaimedFileUpdateInstalled(tx); err != nil {
+		if _, err := RecordClaimedFileUpdateInstalled(tx, fileUpdateInstallReceiptsForTest(t, tx)...); err != nil {
 			t.Fatal(err)
 		}
 		replacement := *tx
 		replacement.FromVersion = "replacement"
 		originalAcquire := acquirePendingUpdateLock
 		acquirePendingUpdateLock = func() (func(), error) {
-			if err := WritePendingUpdate(&replacement); err != nil {
+			if err := overwritePendingUpdateForTest(&replacement); err != nil {
 				t.Fatal(err)
 			}
 			return func() {}, nil
@@ -1056,7 +1075,7 @@ func TestGenericUpdateTransitionsBindPendingBeforeWaitingForLock(t *testing.T) {
 		replacement.FromVersion = "replacement"
 		originalAcquire := acquirePendingUpdateLock
 		acquirePendingUpdateLock = func() (func(), error) {
-			if err := WritePendingUpdate(&replacement); err != nil {
+			if err := overwritePendingUpdateForTest(&replacement); err != nil {
 				t.Fatal(err)
 			}
 			return func() {}, nil
@@ -1131,7 +1150,7 @@ func TestRecoverFailedInstallRejectsStaleSameVersionIdentity(t *testing.T) {
 	}
 	second := *first
 	second.CreatedAt = time.Now().UTC().Add(-time.Second).Format(time.RFC3339Nano)
-	if err := WritePendingUpdate(&second); err != nil {
+	if err := overwritePendingUpdateForTest(&second); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(target, []byte("new"), 0o700); err != nil {
@@ -1181,7 +1200,7 @@ func TestMarkUpdateHealthyExactRejectsRewrittenTransaction(t *testing.T) {
 	}
 	changed := *tx
 	changed.FromVersion = "rewritten"
-	if err := WritePendingUpdate(&changed); err != nil {
+	if err := overwritePendingUpdateForTest(&changed); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1221,7 +1240,7 @@ func TestRecoverFailedInstallRejectsRewrittenExactTransaction(t *testing.T) {
 	}
 	changed := *tx
 	changed.FromVersion = "rewritten"
-	if err := WritePendingUpdate(&changed); err != nil {
+	if err := overwritePendingUpdateForTest(&changed); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(target, []byte("new"), 0o700); err != nil {
@@ -1358,7 +1377,7 @@ func TestRecoverFailedInstallAfterInstalledSidecarCommit(t *testing.T) {
 	if err := MarkUpdateApplyFailedExact(prepared, "helper crashed after publish"); err != nil {
 		t.Fatal(err)
 	}
-	recorded, err := RecordClaimedFileUpdateInstalled(prepared)
+	recorded, err := RecordClaimedFileUpdateInstalled(prepared, fileUpdateInstallReceiptsForTest(t, prepared)...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1501,7 +1520,7 @@ func TestMarkUpdateApplyFailedPreservesNewMarkerAfterPendingReplacement(t *testi
 	originalLock := acquirePendingUpdateLock
 	var hookErr error
 	acquirePendingUpdateLock = func() (func(), error) {
-		if hookErr = WritePendingUpdate(&second); hookErr == nil {
+		if hookErr = overwritePendingUpdateForTest(&second); hookErr == nil {
 			hookErr = MarkUpdateApplyFailedExact(&second, "new transaction failed")
 		}
 		return func() {}, nil
@@ -1611,7 +1630,7 @@ func TestHealthyUpdateRemovesBackup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := RecordClaimedFileUpdateInstalled(tx); err != nil {
+	if _, err := RecordClaimedFileUpdateInstalled(tx, fileUpdateInstallReceiptsForTest(t, tx)...); err != nil {
 		t.Fatal(err)
 	}
 	if err := MarkUpdateHealthy("v1"); err != nil {
@@ -1688,7 +1707,7 @@ func TestRecordClaimedFileUpdateInstalledBindsCompleteReleaseUnit(t *testing.T) 
 			t.Fatal(err)
 		}
 	}
-	recorded, err := RecordClaimedFileUpdateInstalled(prepared)
+	recorded, err := RecordClaimedFileUpdateInstalled(prepared, fileUpdateInstallReceiptsForTest(t, prepared)...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1766,7 +1785,7 @@ func TestRecordClaimedFileUpdateInstalledBindsOptionalMissingSibling(t *testing.
 			t.Fatal(err)
 		}
 	}
-	recorded, err := RecordClaimedFileUpdateInstalled(prepared)
+	recorded, err := RecordClaimedFileUpdateInstalled(prepared, fileUpdateInstallReceiptsForTest(t, prepared)...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1804,7 +1823,7 @@ func TestReadPendingUpdateRejectsPartialInstalledReleaseUnitState(t *testing.T) 
 		t.Fatal(err)
 	}
 	tx.Files[0].InstalledStateID = strings.Repeat("a", 64)
-	if err := WritePendingUpdate(tx); err != nil {
+	if err := overwritePendingUpdateForTest(tx); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := ReadPendingUpdate(); err == nil ||
@@ -1830,7 +1849,7 @@ func TestHealthyFileUpdateRejectsBackupDrift(t *testing.T) {
 	if err := os.WriteFile(target, []byte("new"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := RecordClaimedFileUpdateInstalled(tx); err != nil {
+	if _, err := RecordClaimedFileUpdateInstalled(tx, fileUpdateInstallReceiptsForTest(t, tx)...); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(tx.BackupPath, []byte("unrelated"), 0o700); err != nil {
@@ -1914,7 +1933,7 @@ func TestMarkUpdateHealthyPreservesPendingRecreatedDuringCleanup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := RecordClaimedFileUpdateInstalled(tx); err != nil {
+	if _, err := RecordClaimedFileUpdateInstalled(tx, fileUpdateInstallReceiptsForTest(t, tx)...); err != nil {
 		t.Fatal(err)
 	}
 	replacement := *tx
@@ -1925,7 +1944,7 @@ func TestMarkUpdateHealthyPreservesPendingRecreatedDuringCleanup(t *testing.T) {
 	updateCleanupAfterRename = func(oldpath, _ string) {
 		if !injected && oldpath == PendingUpdatePath() {
 			injected = true
-			if err := WritePendingUpdate(&replacement); err != nil {
+			if err := overwritePendingUpdateForTest(&replacement); err != nil {
 				t.Errorf("recreate pending transaction: %v", err)
 			}
 		}
@@ -1959,7 +1978,7 @@ func TestMarkUpdateHealthyPreservesBackupRecreatedDuringCleanup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := RecordClaimedFileUpdateInstalled(tx); err != nil {
+	if _, err := RecordClaimedFileUpdateInstalled(tx, fileUpdateInstallReceiptsForTest(t, tx)...); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2016,7 +2035,7 @@ func TestFileUpdateRollbackCompensatesOnPartialFailure(t *testing.T) {
 
 	originalPublish := rollbackPublishStage
 	rollbackPublishStage = func(oldpath, newpath string) error {
-		if oldpath == guard+".reasonix-rollback-stage" && newpath == guard {
+		if strings.HasPrefix(oldpath, guard+".reasonix-rollback-stage-") && newpath == guard {
 			return errors.New("injected rename failure")
 		}
 		return renameRepairNodeNoReplace(oldpath, newpath)
@@ -2249,7 +2268,7 @@ func TestFileUpdateRollbackRetryPreservesRetainedNewBinary(t *testing.T) {
 
 	originalPublish := rollbackPublishStage
 	rollbackPublishStage = func(oldpath, newpath string) error {
-		if oldpath == guard+".reasonix-rollback-stage" && newpath == guard {
+		if strings.HasPrefix(oldpath, guard+".reasonix-rollback-stage-") && newpath == guard {
 			return errors.New("injected rename failure")
 		}
 		return renameRepairNodeNoReplace(oldpath, newpath)
@@ -2639,10 +2658,10 @@ func TestFileUpdateRollbackStageFailureLeavesInstallUntouched(t *testing.T) {
 
 	originalCopy := rollbackStageCopy
 	rollbackStageCopy = func(src, dst string, mode os.FileMode) (string, error) {
-		if dst == guard+".reasonix-rollback-stage" {
+		if strings.HasPrefix(dst, guard+".reasonix-rollback-stage-") {
 			return "", errors.New("injected copy failure")
 		}
-		return copyFileWithHash(src, dst, mode)
+		return copyFileWithHashCreate(src, dst, mode)
 	}
 	t.Cleanup(func() { rollbackStageCopy = originalCopy })
 
@@ -2704,7 +2723,7 @@ func TestPrepareFileUpdateDoesNotOverwriteLegacyBackupName(t *testing.T) {
 	}
 }
 
-func TestFileUpdateRollbackPreservesPreexistingStage(t *testing.T) {
+func TestFileUpdateRollbackBypassesAndPreservesCrashedStage(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("REASONIX_HOME", home)
 	dir := t.TempDir()
@@ -2722,23 +2741,23 @@ func TestFileUpdateRollbackPreservesPreexistingStage(t *testing.T) {
 	if err := os.WriteFile(target, []byte("new"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	stage := target + ".reasonix-rollback-stage"
+	stage := target + ".reasonix-rollback-stage-crashed"
 	if err := os.WriteFile(stage, []byte("unowned-stage"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
 	result, err := RollbackPendingUpdate()
-	if err == nil || result.RolledBack || result.MixedInstall {
-		t.Fatalf("rollback with preexisting stage = %+v, %v", result, err)
+	if err != nil || !result.RolledBack || result.MixedInstall {
+		t.Fatalf("rollback with crashed stage = %+v, %v", result, err)
 	}
-	if got, err := os.ReadFile(target); err != nil || string(got) != "new" {
-		t.Fatalf("live target changed before staging completed: %q, %v", got, err)
+	if got, err := os.ReadFile(target); err != nil || string(got) != "old" {
+		t.Fatalf("restored target = %q, %v", got, err)
 	}
 	if got, err := os.ReadFile(stage); err != nil || string(got) != "unowned-stage" {
 		t.Fatalf("preexisting stage was overwritten: %q, %v", got, err)
 	}
-	if !HasPendingUpdate() {
-		t.Fatal("failed staging removed pending recovery state")
+	if HasPendingUpdate() {
+		t.Fatal("successful rollback left pending recovery state")
 	}
 }
 
@@ -2769,12 +2788,12 @@ func TestRecordClaimedFileUpdateInstalledKeepsPendingPublicDuringSidecarCommit(t
 	installedUpdateAfterCreate = func(string) {
 		pendingBeforeRewrite, hookErr = ReadPendingUpdate()
 		if hookErr == nil {
-			hookErr = WritePendingUpdate(&concurrent)
+			hookErr = overwritePendingUpdateForTest(&concurrent)
 		}
 	}
 	t.Cleanup(func() { installedUpdateAfterCreate = originalHook })
 
-	if _, err := RecordClaimedFileUpdateInstalled(prepared); err == nil {
+	if _, err := RecordClaimedFileUpdateInstalled(prepared, fileUpdateInstallReceiptsForTest(t, prepared)...); err == nil {
 		t.Fatal("record installed update overwrote a concurrent pending rewrite")
 	}
 	if hookErr != nil {
@@ -2814,7 +2833,7 @@ func TestMarkUpdateHealthyRechecksReleaseUnitAfterPendingDisplacement(t *testing
 	if err := os.WriteFile(target, []byte("new"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	recorded, err := RecordClaimedFileUpdateInstalled(prepared)
+	recorded, err := RecordClaimedFileUpdateInstalled(prepared, fileUpdateInstallReceiptsForTest(t, prepared)...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2863,7 +2882,7 @@ func TestMarkUpdateHealthyFailsClosedWhenPendingDisappearsBeforeCommit(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := RecordClaimedFileUpdateInstalled(tx); err != nil {
+	if _, err := RecordClaimedFileUpdateInstalled(tx, fileUpdateInstallReceiptsForTest(t, tx)...); err != nil {
 		t.Fatal(err)
 	}
 
@@ -3085,6 +3104,79 @@ func TestPublishClaimedFileUpdateMemberUsesCompareAndPublish(t *testing.T) {
 	}
 }
 
+func TestRecordClaimedFileUpdateInstalledRejectsDriftAfterPublish(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("REASONIX_HOME", home)
+	dir := t.TempDir()
+	target := filepath.Join(dir, "reasonix-desktop")
+	guard := filepath.Join(dir, "reasonix-guard")
+	originalExecutable := repairExecutable
+	repairExecutable = func() (string, error) { return guard, nil }
+	t.Cleanup(func() { repairExecutable = originalExecutable })
+	if err := os.WriteFile(target, []byte("old"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := PrepareFileUpdate("v1", "v2", target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := PublishClaimedFileUpdateMemberExact(claimed, target, []byte("new"), 0o700)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(target, []byte("concurrent"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RecordClaimedFileUpdateInstalled(claimed, receipt); err == nil ||
+		!strings.Contains(err.Error(), "release unit changed while recording") {
+		t.Fatalf("record after post-publish drift = %v", err)
+	}
+	if _, err := os.Lstat(installedFileUpdateStatePath(claimed)); !os.IsNotExist(err) {
+		t.Fatalf("post-publish drift created installed sidecar: %v", err)
+	}
+	if !HasPendingUpdate() {
+		t.Fatal("post-publish drift removed pending recovery state")
+	}
+}
+
+func TestRecordClaimedFileUpdateInstalledRequiresCompletePublishReceipts(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("REASONIX_HOME", home)
+	dir := t.TempDir()
+	target := filepath.Join(dir, "reasonix-desktop")
+	guard := filepath.Join(dir, "reasonix-guard")
+	originalExecutable := repairExecutable
+	repairExecutable = func() (string, error) { return guard, nil }
+	t.Cleanup(func() { repairExecutable = originalExecutable })
+	if err := os.WriteFile(target, []byte("old"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := PrepareFileUpdate("v1", "v2", target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte("new"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := RecordClaimedFileUpdateInstalled(claimed); err == nil ||
+		!strings.Contains(err.Error(), "publish receipt is missing") {
+		t.Fatalf("record without publish receipt = %v", err)
+	}
+	receipt := fileUpdateInstallReceiptsForTest(t, claimed)[0]
+	if _, err := RecordClaimedFileUpdateInstalled(claimed, receipt, receipt); err == nil ||
+		!strings.Contains(err.Error(), "duplicate publish receipt") {
+		t.Fatalf("record with duplicate publish receipt = %v", err)
+	}
+	foreign := receipt
+	foreign.UpdateTransactionID = strings.Repeat("0", 64)
+	if _, err := RecordClaimedFileUpdateInstalled(claimed, foreign); err == nil ||
+		!strings.Contains(err.Error(), "different transaction") {
+		t.Fatalf("record with foreign publish receipt = %v", err)
+	}
+}
+
 func TestPublishClaimedFileUpdateMemberPreservesConcurrentRecreate(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("REASONIX_HOME", home)
@@ -3237,7 +3329,7 @@ func TestPublishClaimedFileUpdateMemberRejectsSameContentStageSymlink(t *testing
 	if hookErr != nil {
 		t.Skipf("replace staged update with symlink: %v", hookErr)
 	}
-	if err == nil || !strings.Contains(err.Error(), "not a regular file") {
+	if err == nil || !strings.Contains(err.Error(), "installed reasonix-desktop changed") {
 		t.Fatalf("symlink-swapped member publish = %v", err)
 	}
 	if got, err := os.ReadFile(target); err != nil || string(got) != "old" {
@@ -3277,7 +3369,7 @@ func TestFileUpdateRollbackCleansInstalledNodeBoundToTransaction(t *testing.T) {
 	if err := os.WriteFile(target, []byte("installed"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := RecordClaimedFileUpdateInstalled(prepared); err != nil {
+	if _, err := RecordClaimedFileUpdateInstalled(prepared, fileUpdateInstallReceiptsForTest(t, prepared)...); err != nil {
 		t.Fatal(err)
 	}
 

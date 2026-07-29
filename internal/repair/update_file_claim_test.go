@@ -53,7 +53,7 @@ func TestClaimPendingFileUpdateExactRejectsRewrittenTransaction(t *testing.T) {
 	tx, launcher, paths := prepareTestFileUpdateClaim(t)
 	changed := *tx
 	changed.FromVersion = "rewritten"
-	if err := WritePendingUpdate(&changed); err != nil {
+	if err := overwritePendingUpdateForTest(&changed); err != nil {
 		t.Fatal(err)
 	}
 
@@ -159,7 +159,7 @@ func TestClaimPendingFileUpdateRejectsPreparedMissingFileAppearing(t *testing.T)
 func TestReadPendingFileUpdateRejectsDuplicateReleaseTarget(t *testing.T) {
 	tx, launcher, _ := prepareTestFileUpdateClaim(t)
 	tx.Files = append(tx.Files, tx.Files[0])
-	if err := WritePendingUpdate(tx); err != nil {
+	if err := overwritePendingUpdateForTest(tx); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := readPendingUpdateForLauncher(launcher); err == nil || !strings.Contains(err.Error(), "duplicate release file") {
@@ -203,7 +203,7 @@ func TestClaimPendingFileUpdateRejectsReplacementWhileLocking(t *testing.T) {
 	}
 	replacement := *tx
 	replacement.CreatedAt = time.Now().UTC().Add(time.Second).Format(time.RFC3339Nano)
-	if err := WritePendingUpdate(&replacement); err != nil {
+	if err := overwritePendingUpdateForTest(&replacement); err != nil {
 		holder()
 		t.Fatal(err)
 	}

@@ -413,45 +413,21 @@ func ApplyRepairPlan(plan RepairPlan, opts ApplyPlanOptions) (ApplyPlanResult, e
 		return ApplyPlanResult{Applied: []string{}}, err
 	}
 	defer unlockTransaction()
+	if err := reconcilePreparedRepairTransaction(); err != nil {
+		return ApplyPlanResult{}, fmt.Errorf("reconcile pending repair mutation: %w", err)
+	}
 	boundPreview := preview
 	result := ApplyPlanResult{Applied: []string{}}
-	// Each action records its own transaction in last-repair.json, so a
-	// multi-action plan would otherwise leave only its final action undoable.
-	// Merge every transaction the plan produces into one plan-level
-	// transaction, persisted after each action so a mid-plan failure still
-	// leaves the already-applied prefix fully undoable.
+	// Every mutating action appends to this shared transaction before it persists
+	// progress. This keeps the complete applied prefix durable even if the process
+	// exits inside an action, before control returns to this loop.
 	planTx := newRepairTransaction(time.Now())
-	absorbed := 0
-	lastSeenID := ""
-	if last, err := ReadLastRepair(); err == nil {
-		lastSeenID = last.ID
-	}
-	absorbRepair := func() error {
-		last, err := ReadLastRepair()
-		if err != nil || last.ID == lastSeenID {
-			return nil
-		}
-		lastSeenID = last.ID
-		planTx.Changes = append(planTx.Changes, last.Changes...)
-		absorbed++
-		if absorbed < 2 {
-			// A single recorded action is already exactly the last repair.
-			return nil
-		}
-		return persistRepairTransaction(planTx)
-	}
 	for i, action := range plan.Actions {
-		var actionErr error
 		// Empty ExpectedPreviewID only skips the cross-invocation confirmation
 		// check above. The filesystem state observed by this invocation's preview
 		// is always rechecked under the mutation locks before applying.
-		applied, actionErr := applyRepairPlanAction(plan, action, boundPreview[i], opts, true)
+		applied, actionErr := applyRepairPlanAction(plan, action, boundPreview[i], opts, planTx, true)
 		result.Applied = append(result.Applied, applied...)
-		// Absorb even on failure: a partially applied action may have recorded
-		// changes that the plan-level undo must cover.
-		if mergeErr := absorbRepair(); mergeErr != nil && actionErr == nil {
-			return result, fmt.Errorf("action %d: record plan transaction: %w", i+1, mergeErr)
-		}
 		if actionErr != nil {
 			return result, fmt.Errorf("action %d: %w", i+1, actionErr)
 		}
@@ -459,7 +435,14 @@ func ApplyRepairPlan(plan RepairPlan, opts ApplyPlanOptions) (ApplyPlanResult, e
 	return result, nil
 }
 
-func applyRepairPlanAction(plan RepairPlan, action RepairPlanAction, bound RepairPlanPreview, opts ApplyPlanOptions, enforcePreview bool) ([]string, error) {
+func applyRepairPlanAction(
+	plan RepairPlan,
+	action RepairPlanAction,
+	bound RepairPlanPreview,
+	opts ApplyPlanOptions,
+	planTx *RepairTransaction,
+	enforcePreview bool,
+) ([]string, error) {
 	if action.Type == "rollback_update" {
 		// Target locks are taken inside rollback under the pending-update
 		// lock so Guard and the updater serialize on the same release-unit
@@ -533,19 +516,20 @@ func applyRepairPlanAction(plan RepairPlan, action RepairPlanAction, bound Repai
 			expectedStates:         expectedStates,
 			confirmedGlobalRestore: confirmedContent,
 			hasConfirmedRestore:    hasConfirmedContent,
+			repairTransaction:      planTx,
 		})
 		if err != nil {
 			return nil, err
 		}
 		return report.Applied, nil
 	case "restore_snapshot":
-		tx, err := restoreConfigSnapshotBoundUnlocked(action.SnapshotID, expectedStates, confirmedContent)
+		tx, err := restoreConfigSnapshotBoundUnlocked(action.SnapshotID, expectedStates, confirmedContent, planTx)
 		if err != nil {
 			return nil, err
 		}
 		return []string{"restored config snapshot (undo " + tx.ID + ")"}, nil
 	case "rebuild_derived_state":
-		return rebuildDerivedStateBoundUnlocked(action.Target, expectedStates)
+		return rebuildDerivedStateBoundUnlocked(action.Target, expectedStates, planTx)
 	default:
 		return nil, fmt.Errorf("unsupported repair action %q", action.Type)
 	}

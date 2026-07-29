@@ -2,13 +2,19 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 
+	"reasonix/desktop/internal/update"
 	"reasonix/internal/repair"
 )
+
+const maxWindowsPayloadMetadataSize = 64 << 10
+
+var verifyWindowsPayloadManifestFn = update.Verify
 
 type stagedFileUpdateMember struct {
 	targetPath string
@@ -24,6 +30,9 @@ func loadWindowsStagedReleaseUnit(claimed *repair.UpdateTransaction, stagingDir 
 	if claimed == nil || claimed.TargetKind != "file" || len(claimed.Files) == 0 {
 		return nil, fmt.Errorf("load staged release unit: transaction identity is incomplete")
 	}
+	if err := validateWindowsClaimedReleaseUnit(claimed); err != nil {
+		return nil, fmt.Errorf("load staged release unit: %w", err)
+	}
 	stagingDir = filepath.Clean(strings.TrimSpace(stagingDir))
 	if stagingDir == "" || stagingDir == "." || !filepath.IsAbs(stagingDir) {
 		return nil, fmt.Errorf("load staged release unit: staging directory is invalid")
@@ -34,6 +43,10 @@ func loadWindowsStagedReleaseUnit(claimed *repair.UpdateTransaction, stagingDir 
 	}
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return nil, fmt.Errorf("load staged release unit: staging path is not a directory")
+	}
+	hashes, err := loadWindowsPayloadManifest(stagingDir, claimed.ToVersion)
+	if err != nil {
+		return nil, fmt.Errorf("load staged release unit: %w", err)
 	}
 
 	contents := make(map[string][]byte)
@@ -67,9 +80,12 @@ func loadWindowsStagedReleaseUnit(claimed *repair.UpdateTransaction, stagingDir 
 			if !sourceInfo.Mode().IsRegular() {
 				return nil, fmt.Errorf("load staged release unit: %s is not a regular file", sourceName)
 			}
-			content, err = os.ReadFile(sourcePath)
+			content, err = readVerifiedWindowsStagedPayloadFn(sourcePath)
 			if err != nil {
 				return nil, fmt.Errorf("load staged release unit: read %s: %w", sourceName, err)
+			}
+			if !strings.EqualFold(update.WindowsPayloadSHA256(content), hashes[sourceName]) {
+				return nil, fmt.Errorf("load staged release unit: %s does not match the signed release manifest", sourceName)
 			}
 			contents[sourceName] = content
 		}
@@ -88,6 +104,99 @@ func loadWindowsStagedReleaseUnit(claimed *repair.UpdateTransaction, stagingDir 
 		return !iPrimary && jPrimary
 	})
 	return members, nil
+}
+
+func validateWindowsClaimedReleaseUnit(claimed *repair.UpdateTransaction) error {
+	if claimed == nil ||
+		!strings.EqualFold(filepath.Base(claimed.TargetPath), "reasonix-desktop.exe") {
+		return fmt.Errorf("claimed release unit primary executable is invalid")
+	}
+	required := map[string]bool{
+		"reasonix-desktop.exe":       false,
+		"reasonix-guard.exe":         false,
+		"reasonix-launcher.exe":      false,
+		"reasonix-update-helper.exe": false,
+		"reasonix-cli.exe":           false,
+		"reasonix.exe":               false,
+	}
+	installDir := filepath.Clean(filepath.Dir(claimed.TargetPath))
+	for _, file := range claimed.Files {
+		target := filepath.Clean(strings.TrimSpace(file.TargetPath))
+		if target == "" || target == "." ||
+			!strings.EqualFold(filepath.Dir(target), installDir) {
+			return fmt.Errorf("claimed release unit target is outside the installation directory")
+		}
+		name := strings.ToLower(filepath.Base(target))
+		seen, ok := required[name]
+		if !ok {
+			return fmt.Errorf("claimed release unit contains an unexpected target")
+		}
+		if seen {
+			return fmt.Errorf("claimed release unit contains a duplicate target")
+		}
+		required[name] = true
+	}
+	for name, seen := range required {
+		if !seen {
+			return fmt.Errorf("claimed release unit omits %s", name)
+		}
+	}
+	if len(claimed.Files) != len(required) {
+		return fmt.Errorf("claimed release unit contains an unexpected target")
+	}
+	return nil
+}
+
+func loadWindowsPayloadManifest(stagingDir, expectedVersion string) (map[string]string, error) {
+	manifest, err := readWindowsPayloadMetadata(filepath.Join(stagingDir, update.WindowsPayloadManifestName))
+	if err != nil {
+		return nil, fmt.Errorf("read signed release manifest: %w", err)
+	}
+	signature, err := readWindowsPayloadMetadata(filepath.Join(stagingDir, update.WindowsPayloadSignatureName))
+	if err != nil {
+		return nil, fmt.Errorf("read signed release manifest signature: %w", err)
+	}
+	if err := verifyWindowsPayloadManifestFn(manifest, signature); err != nil {
+		return nil, fmt.Errorf("verify signed release manifest: %w", err)
+	}
+	hashes, err := update.DecodeWindowsPayloadManifest(manifest, expectedVersion)
+	if err != nil {
+		return nil, err
+	}
+	return hashes, nil
+}
+
+func readWindowsPayloadMetadata(path string) ([]byte, error) {
+	pathInfo, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !pathInfo.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", filepath.Base(path))
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > maxWindowsPayloadMetadataSize {
+		return nil, fmt.Errorf("%s is not a bounded regular file", filepath.Base(path))
+	}
+	if !os.SameFile(pathInfo, info) {
+		return nil, fmt.Errorf("%s changed before it was opened", filepath.Base(path))
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxWindowsPayloadMetadataSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) == 0 || len(data) > maxWindowsPayloadMetadataSize {
+		return nil, fmt.Errorf("%s changed size while it was read", filepath.Base(path))
+	}
+	return data, nil
 }
 
 func windowsStagedSourceName(targetBase string) (string, error) {
@@ -112,15 +221,18 @@ func windowsStagedSourceName(targetBase string) (string, error) {
 func publishLoadedFileUpdateReleaseUnit(
 	claimed *repair.UpdateTransaction,
 	members []stagedFileUpdateMember,
-	publish func(*repair.UpdateTransaction, string, []byte, os.FileMode) error,
-) error {
+	publish func(*repair.UpdateTransaction, string, []byte, os.FileMode) (repair.FileUpdateInstallReceipt, error),
+) ([]repair.FileUpdateInstallReceipt, error) {
 	if publish == nil || len(members) == 0 {
-		return fmt.Errorf("publish staged release unit: payload is incomplete")
+		return nil, fmt.Errorf("publish staged release unit: payload is incomplete")
 	}
+	receipts := make([]repair.FileUpdateInstallReceipt, 0, len(members))
 	for _, member := range members {
-		if err := publish(claimed, member.targetPath, member.content, member.mode); err != nil {
-			return fmt.Errorf("publish staged release unit %s: %w", filepath.Base(member.targetPath), err)
+		receipt, err := publish(claimed, member.targetPath, member.content, member.mode)
+		if err != nil {
+			return receipts, fmt.Errorf("publish staged release unit %s: %w", filepath.Base(member.targetPath), err)
 		}
+		receipts = append(receipts, receipt)
 	}
-	return nil
+	return receipts, nil
 }
