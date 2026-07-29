@@ -91,6 +91,11 @@ func RenderTOMLForScope(c *Config, scope RenderScope) string {
 	}
 
 	if scope != RenderScopeProject {
+		b.WriteString("[cli]   # native CLI preferences; user/global only, ./reasonix.toml cannot override\n")
+		fmt.Fprintf(&b, "update_channel = %q   # stable|preview; used by `reasonix upgrade`\n\n", c.CLIUpdateChannel())
+	}
+
+	if scope != RenderScopeProject {
 		b.WriteString("[desktop]\n")
 		if lang := c.DesktopLanguage(); lang != "" {
 			fmt.Fprintf(&b, "language = %q   # desktop UI language; empty/auto = browser/OS auto-detect\n", lang)

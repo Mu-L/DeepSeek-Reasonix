@@ -1844,10 +1844,20 @@ func rememberPermissionConfigPath(workspaceRoot string) string {
 func rememberPlanModeReadOnlyCommand(workspaceRoot, prefix string) control.PlanModeReadOnlyCommandTrustResult {
 	prefix = strings.TrimSpace(prefix)
 	path := rememberPermissionConfigPath(workspaceRoot)
-	edit := config.LoadForEdit(path)
 	result := control.PlanModeReadOnlyCommandTrustResult{Prefix: prefix, Path: path}
 	if prefix == "" {
 		result.Err = fmt.Errorf("empty plan-mode read-only command prefix")
+		return result
+	}
+	unlock, err := config.LockConfigFileEdits(path)
+	if err != nil {
+		result.Err = err
+		return result
+	}
+	defer unlock()
+	edit, err := config.LoadForEditReadOnlyStrict(path)
+	if err != nil {
+		result.Err = err
 		return result
 	}
 	if coveredBy := coveredPlanModeReadOnlyCommand(edit.Agent.PlanModeReadOnlyCommands, prefix); coveredBy != "" {

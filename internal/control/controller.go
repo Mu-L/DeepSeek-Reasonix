@@ -4713,31 +4713,9 @@ func (c *Controller) AddMCPServer(e config.PluginEntry) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	var previous config.PluginEntry
-	hadPrevious := false
-	for _, configured := range config.LoadForEdit(config.UserConfigPath()).Plugins {
-		if configured.Name == e.Name {
-			previous, hadPrevious = configured, true
-			previous.Source = config.MCPSourceUserConfig
-			break
-		}
-	}
-	if _, err := config.UpsertPluginInSourceForRoot(c.workspaceRoot, e); err != nil {
+	if _, err := config.InstallUserPluginForRoot(c.workspaceRoot, e, true); err != nil {
 		c.DisconnectMCPServer(e.Name)
 		return 0, fmt.Errorf("saving MCP server config: %w", err)
-	}
-	// Install implies durable enable so the next session keeps the server in the
-	// catalog without a second activation step.
-	if err := config.DefaultMCPActivationStore().SetServerEnabled(e, c.WorkspaceRoot(), true); err != nil {
-		c.DisconnectMCPServer(e.Name)
-		var saveErr error
-		if hadPrevious {
-			_, saveErr = config.UpsertPluginInSourceForRoot(c.workspaceRoot, previous)
-		} else {
-			_, _, saveErr = config.RemovePluginFromSourceForRoot(c.workspaceRoot, e)
-		}
-		c.syncCapabilityRuntimeFromConfig(e.Name, nil)
-		return 0, errors.Join(err, saveErr)
 	}
 	return n, nil
 }

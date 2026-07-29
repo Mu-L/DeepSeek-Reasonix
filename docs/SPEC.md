@@ -656,6 +656,9 @@ default_model = "deepseek"   # provider name (→ its default model) or "provide
 # shortcut_layout = "desktop"       # classic|desktop; compatibility setting
 # cursor_shape = "bar"              # CLI/TUI textarea cursor: underline|block|bar
 
+[cli]                               # user/global only; project reasonix.toml cannot override
+update_channel = "stable"           # stable|preview; missing/unknown values resolve to stable
+
 [agent]
 system_prompt = "You are Reasonix, a coding agent..."  # or system_prompt_file = "..."
 temperature       = 0.0
@@ -734,6 +737,11 @@ args    = []
 # url     = "https://mcp.stripe.com"
 # headers = { Authorization = "Bearer ${STRIPE_KEY}" }   # ${VAR} / ${VAR:-default} expanded
 ```
+
+The native CLI update channel is persisted in the user config. `reasonix
+upgrade` follows it, while `reasonix upgrade stable|preview` changes it and
+updates the same installed binary. The advanced `--channel` flag is a one-off
+override for automation and does not change the saved value.
 
 The executor tracks an adaptive progress lease while a todo is active. A new
 completion, unique successful read, command, or mutation renews the lease;

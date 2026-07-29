@@ -14,7 +14,6 @@ import (
 	"runtime"
 	"strings"
 
-	"reasonix/internal/fileutil"
 	fileencoding "reasonix/internal/fileutil/encoding"
 	"reasonix/internal/netclient"
 	"reasonix/internal/provider"
@@ -44,6 +43,7 @@ type Config struct {
 	Language         string              `toml:"language"` // ui/model language tag (e.g. "zh"); empty = auto-detect from $LANG / $REASONIX_LANG
 	CredentialsStore string              `toml:"credentials_store"`
 	UI               UIConfig            `toml:"ui"`
+	CLI              CLIConfig           `toml:"cli"`
 	Desktop          DesktopConfig       `toml:"desktop"`
 	Telemetry        TelemetryConfig     `toml:"telemetry"`
 	Notifications    NotificationsConfig `toml:"notifications"`
@@ -72,6 +72,7 @@ type Config struct {
 	pluginPackageSkillOwners   map[string][]string
 	pluginPackageAgentOwners   map[string][]string
 	safeMode                   bool
+	editLoadErr                error
 }
 
 // TelemetryConfig controls content-free CLI usage metrics. It is user-global:
@@ -168,6 +169,13 @@ type UIConfig struct {
 	CloseBehavior  string `toml:"close_behavior"`  // legacy desktop close behavior; prefer desktop.close_behavior
 	ShowReasoning  bool   `toml:"show_reasoning"`  // Ctrl+O / /verbose: show thinking text in CLI; false = collapsed
 	CursorShape    string `toml:"cursor_shape"`    // block|underline|bar; empty defaults to bar
+}
+
+// CLIConfig controls user-global native CLI behavior. It is separate from
+// project runtime settings so a repository cannot change the installed
+// binary's update channel.
+type CLIConfig struct {
+	UpdateChannel string `toml:"update_channel"` // stable|preview; empty and unknown values resolve to stable
 }
 
 // DesktopConfig controls desktop-only UI preferences. It is intentionally
@@ -498,6 +506,23 @@ func (c *Config) DesktopCheckUpdates() bool {
 		return true
 	}
 	return *c.Desktop.CheckUpdates
+}
+
+// NormalizeCLIUpdateChannel returns the canonical native CLI update channel.
+// Missing and unknown values fail closed to Stable.
+func NormalizeCLIUpdateChannel(ch string) string {
+	if strings.EqualFold(strings.TrimSpace(ch), "preview") {
+		return "preview"
+	}
+	return "stable"
+}
+
+// CLIUpdateChannel returns the user-global native CLI update channel.
+func (c *Config) CLIUpdateChannel() string {
+	if c == nil {
+		return "stable"
+	}
+	return NormalizeCLIUpdateChannel(c.CLI.UpdateChannel)
 }
 
 // NormalizeDesktopUpdateChannel returns the canonical desktop update channel.
@@ -1742,7 +1767,7 @@ func Default() *Config {
 // main config into an unparseable state that leaves the app with no usable
 // models (#4615, #4708).
 func (c *Config) WriteFile(path string) error {
-	return fileutil.AtomicWriteFile(path, []byte(RenderTOMLForScope(c, renderScopeForPath(path))), configFilePerm(path))
+	return atomicWriteToConfigFile(path, RenderTOMLForScope(c, renderScopeForPath(path)), configFilePerm(path))
 }
 
 // Provider returns the named provider entry.

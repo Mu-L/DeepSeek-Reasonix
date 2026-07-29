@@ -23,7 +23,13 @@ import type { Bindings as RegistryBindings } from "./registry/env";
 import { PackageRepo } from "./registry/db/packages";
 import { EventRepo } from "./registry/db/events";
 import { renderCommunity } from "./community";
-import { desktopReleaseChannel, handleDesktopReleaseManifest } from "./desktop_release";
+import {
+  cliReleaseChannel,
+  desktopReleaseChannel,
+  handleCLIRelease,
+  handleDesktopReleaseManifest,
+  handleReleaseGatewayRequest,
+} from "./desktop_release";
 
 const MAX_BODY_BYTES = 96 * 1024;
 const LATEST_SAMPLES_PER_GROUP = 5;
@@ -1452,7 +1458,13 @@ export default {
     const method = request.method;
 
     const desktopRelease = desktopReleaseChannel(path);
-    if (desktopRelease && method === "GET") return handleDesktopReleaseManifest(desktopRelease);
+    if (desktopRelease) {
+      return handleReleaseGatewayRequest(method, () => handleDesktopReleaseManifest(desktopRelease));
+    }
+    const cliRelease = cliReleaseChannel(path);
+    if (cliRelease) {
+      return handleReleaseGatewayRequest(method, () => handleCLIRelease(cliRelease));
+    }
 
     if (path === "/v1/report" && method === "POST") return handleReport(request, env);
     if (path === "/v1/ping" && method === "POST") return handlePing(request, env);
@@ -1514,7 +1526,6 @@ export default {
       path === "/v1/report" ||
       path === "/v1/ping" ||
       path === "/v1/metrics" ||
-      desktopReleaseChannel(path) ||
       path === "/login" ||
       path === "/register" ||
       path === "/logout" ||

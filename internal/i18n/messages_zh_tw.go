@@ -510,7 +510,7 @@ var ChineseTraditional = Messages{
   reasonix hook list|status --json [--dir PATH]         檢視脫敏 Hook 狀態
   reasonix task list|show --json [--dir PATH]           檢視脫敏 Task 狀態
   reasonix bot start|doctor|weixin-login                多管道 IM bot 閘道
-  reasonix upgrade [--check] [--force]                   自更新至最新版本（也可用：reasonix update）
+  reasonix upgrade [stable|preview] [--check] [--force]  按已儲存渠道自更新（進階用法：--channel；別名：reasonix update）
   reasonix version
   reasonix help
 

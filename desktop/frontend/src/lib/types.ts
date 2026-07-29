@@ -1784,6 +1784,7 @@ export interface UpdateInfo {
 }
 
 export interface UpdateDownloadResult {
+  requestId: string;
   version: string;
   channel: string;
   path: string;
@@ -1792,6 +1793,9 @@ export interface UpdateDownloadResult {
 }
 
 export interface UpdateProgress {
+  requestId: string;
+  version: string;
+  channel: "stable" | "preview" | string;
   phase: "downloading" | "verifying" | "downloaded" | "authorizing" | "installing" | "done" | "error";
   received: number;
   total: number;

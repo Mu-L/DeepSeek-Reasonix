@@ -40,6 +40,11 @@ import (
 // generator and the updater agree on update.PlatformKey output.
 var platforms = []string{"darwin-arm64", "darwin-amd64", "windows-amd64", "windows-arm64", "linux-amd64"}
 
+var websiteDownloads = map[string]struct{}{
+	"Reasonix-darwin-universal.dmg": {},
+	"Reasonix-windows-amd64.zip":    {},
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		usage()
@@ -210,6 +215,7 @@ func genManifest(dir, version, tag string) error {
 		DownloadPage:   "https://reasonix.io/?download=desktop#start",
 		Platforms:      map[string]update.Asset{},
 		NativePackages: map[string]update.Asset{},
+		Downloads:      map[string]update.Asset{},
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -221,7 +227,8 @@ func genManifest(dir, version, tag string) error {
 			continue
 		}
 		key, kind := matchArtifact(name)
-		if key == "" {
+		_, websiteDownload := websiteDownloads[name]
+		if key == "" && !websiteDownload {
 			continue
 		}
 		size, sum, err := hashFile(filepath.Join(dir, name))
@@ -230,13 +237,19 @@ func genManifest(dir, version, tag string) error {
 		}
 		url := fmt.Sprintf("https://github.com/%s/releases/download/%s/%s", repo, tag, name)
 		asset := update.Asset{URL: url, Sig: url + ".minisig", Size: size, SHA256: sum}
-		switch kind {
-		case artifactNative:
-			m.NativePackages[key] = asset
-			fmt.Printf("manifest native: %s -> %s (%d bytes)\n", key, name, size)
-		default:
-			m.Platforms[key] = asset
-			fmt.Printf("manifest: %s -> %s (%d bytes)\n", key, name, size)
+		if websiteDownload {
+			m.Downloads[name] = asset
+			fmt.Printf("manifest download: %s (%d bytes)\n", name, size)
+		}
+		if key != "" {
+			switch kind {
+			case artifactNative:
+				m.NativePackages[key] = asset
+				fmt.Printf("manifest native: %s -> %s (%d bytes)\n", key, name, size)
+			default:
+				m.Platforms[key] = asset
+				fmt.Printf("manifest: %s -> %s (%d bytes)\n", key, name, size)
+			}
 		}
 	}
 	if len(m.Platforms) == 0 {
@@ -244,6 +257,9 @@ func genManifest(dir, version, tag string) error {
 	}
 	if len(m.NativePackages) == 0 {
 		m.NativePackages = nil // omit empty map so older tooling sees a clean document
+	}
+	if len(m.Downloads) == 0 {
+		m.Downloads = nil
 	}
 	b, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {

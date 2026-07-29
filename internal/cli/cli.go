@@ -1386,6 +1386,19 @@ func confirmReconfigureExistingConfig(path string, in *bufio.Scanner, w io.Write
 }
 
 func writeDefaultConfig(path string) int {
+	unlock, err := config.LockConfigFileEdits(path)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, i18n.M.WriteConfigErr, err)
+		return 1
+	}
+	defer unlock()
+	if _, err := os.Lstat(path); err == nil {
+		fmt.Fprintf(os.Stderr, i18n.M.NotOverwritingFmt+"\n", path)
+		return 1
+	} else if !os.IsNotExist(err) {
+		fmt.Fprintln(os.Stderr, i18n.M.WriteConfigErr, err)
+		return 1
+	}
 	c := config.Default()
 	if err := c.SaveTo(path); err != nil {
 		fmt.Fprintln(os.Stderr, i18n.M.WriteConfigErr, err)
@@ -1412,7 +1425,11 @@ func interactiveSetup(configPath, envPath string) int {
 	// Seed from the existing config when reconfiguring, so a re-run to fix a key
 	// preserves the user's providers / agent settings instead of resetting to
 	// defaults. First run (no file) falls back to the built-in defaults.
-	cfg := config.LoadForEdit(configPath)
+	cfg, err := config.LoadForEditReadOnlyStrict(configPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, i18n.M.WriteConfigErr, err)
+		return 1
+	}
 	session := newProviderSetupSessionForPath(cfg, configPath)
 	lang, err := selectLanguage()
 	if err != nil {
@@ -2413,6 +2430,12 @@ func configReasoningLanguageCommand(args []string) int {
 		fmt.Fprintln(os.Stderr, i18n.M.ErrorPrefix, "cannot resolve config path")
 		return 1
 	}
+	unlock, err := config.LockConfigFileEdits(path)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, i18n.M.ErrorPrefix, err)
+		return 1
+	}
+	defer unlock()
 	if *local {
 		if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
 			lang, err := config.SaveMinimalProjectReasoningLanguage(path, mode)
@@ -2427,14 +2450,11 @@ func configReasoningLanguageCommand(args []string) int {
 			return 1
 		}
 	}
-	if !*local {
-		// Non-local writes target the user config; serialize the
-		// load-modify-save against other in-process user-config editors.
-		// --local writes ./reasonix.toml and needs no user-config lock.
-		unlock := config.LockUserConfigEdits()
-		defer unlock()
+	cfg, err := config.LoadForEditReadOnlyStrict(path)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, i18n.M.ErrorPrefix, err)
+		return 1
 	}
-	cfg := config.LoadForEdit(path)
 	if err := cfg.SetReasoningLanguage(mode); err != nil {
 		fmt.Fprintln(os.Stderr, i18n.M.ErrorPrefix, err)
 		return 2

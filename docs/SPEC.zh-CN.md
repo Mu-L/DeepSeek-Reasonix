@@ -227,6 +227,9 @@ flag > ./reasonix.toml > 用户 config.toml > 内置默认值
 ```toml
 default_model = "deepseek"
 
+[cli]                          # 仅用户全局生效，项目 reasonix.toml 不能覆盖
+update_channel = "stable"      # stable|preview；缺失或未知值回退到 stable
+
 [agent]
 temperature = 0.0
 reasoning_language = "auto"
@@ -258,6 +261,10 @@ allow = ["Bash(go test:*)", "Bash(git status:*)"]
 [serve]
 auth_mode = "none"
 ```
+
+原生 CLI 更新渠道保存在用户配置中。`reasonix upgrade` 跟随已保存渠道，
+`reasonix upgrade stable|preview` 会切换渠道并更新同一个已安装二进制文件。高级参数
+`--channel` 只供自动化做单次覆盖，不改变保存值。
 
 `[sandbox]` 是权限策略之下的强制执行层。file writer 默认限制在 workspace root、Reasonix 用户配置目录和 `allow_write`；`forbid_read` 可阻止读取敏感路径。macOS 使用 Seatbelt，Linux 使用 bubblewrap；若声明 enforce 但平台 backend 不可用，Bash 应拒绝执行而不是静默降级。Windows 当前没有 OS 级 Bash sandbox，file tool 的路径限制仍然生效。
 

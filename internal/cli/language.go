@@ -46,14 +46,24 @@ func (m *chatTUI) runLanguageSubcommand(input string) tea.Cmd {
 		m.notice("language: cannot resolve config path")
 		return nil
 	}
-	// Lock the whole load-modify-save cycle, including the user-scope override
-	// cleanup — its own read-modify-write on the user config. path may be a
-	// project config here; holding the user-config lock for that case is
-	// harmless. The controller update below runs off-lock.
+	// Lock both possible write targets before resolving either one. This keeps
+	// a project language update and user-override cleanup atomic even when the
+	// files are reached through aliases.
 	if err := func() error {
-		unlock := config.LockUserConfigEdits()
+		userPath := config.UserConfigPath()
+		lockPaths := []string{path}
+		if userPath != "" && !sameConfigPath(path, userPath) {
+			lockPaths = append(lockPaths, userPath)
+		}
+		unlock, err := config.LockConfigFilesEdits(lockPaths...)
+		if err != nil {
+			return err
+		}
 		defer unlock()
-		edit := config.LoadForEdit(path)
+		edit, err := config.LoadForEditReadOnlyStrict(path)
+		if err != nil {
+			return err
+		}
 		if err := edit.SetLanguage(lang); err != nil {
 			return err
 		}
@@ -96,7 +106,10 @@ func clearUserLanguageOverride(primaryPath string) error {
 		}
 		return err
 	}
-	edit := config.LoadForEdit(userPath)
+	edit, err := config.LoadForEditReadOnlyStrict(userPath)
+	if err != nil {
+		return err
+	}
 	if strings.TrimSpace(edit.Language) == "" {
 		return nil
 	}

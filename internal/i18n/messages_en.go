@@ -561,7 +561,7 @@ Usage:
   reasonix hook list|status --json [--dir PATH]         inspect redacted hook state
   reasonix task list|show --json [--dir PATH]           inspect redacted task state
   reasonix bot start|doctor|weixin-login                multi-channel IM bot gateway
-  reasonix upgrade [--check] [--force]                   self-update to the latest release (also: reasonix update)
+  reasonix upgrade [stable|preview] [--check] [--force]  self-update on the saved channel (advanced: --channel; also: reasonix update)
   reasonix version
   reasonix help
 

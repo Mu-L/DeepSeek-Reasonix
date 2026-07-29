@@ -7,6 +7,14 @@ import (
 )
 
 func decodeTOMLFile(path string, v any) (toml.MetaData, error) {
+	resolved, err := resolveConfigReadPath(path)
+	if err != nil {
+		return toml.MetaData{}, err
+	}
+	return decodeTOMLFileResolved(resolved, v)
+}
+
+func decodeTOMLFileResolved(path string, v any) (toml.MetaData, error) {
 	data, err := fileencoding.ReadFileUTF8(path)
 	if err != nil {
 		return toml.MetaData{}, err

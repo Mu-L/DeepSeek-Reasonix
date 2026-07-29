@@ -2,7 +2,6 @@ package config
 
 import (
 	"fmt"
-	"os"
 	"strings"
 
 	"reasonix/internal/provider"
@@ -285,11 +284,18 @@ func ApplyUserConfigUpgradesOnStartup(path string) (bool, error) {
 	if path == "" {
 		return false, nil
 	}
-	if _, err := os.Stat(path); err != nil {
-		if os.IsNotExist(err) {
-			return false, nil
-		}
+	unlock, err := LockConfigFileEdits(path)
+	if err != nil {
 		return false, err
+	}
+	defer unlock()
+
+	_, exists, err := statConfigPath(path)
+	if err != nil {
+		return false, err
+	}
+	if !exists {
+		return false, nil
 	}
 	var header Config
 	if _, err := decodeTOMLFile(path, &header); err != nil {

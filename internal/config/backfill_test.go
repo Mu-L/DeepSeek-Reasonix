@@ -153,7 +153,7 @@ func TestNormalizeLegacyStepFunBaseURLsMigratesPresetProviders(t *testing.T) {
 	}
 }
 
-func TestLoadForEditPersistsLegacyStepFunBaseURLMigration(t *testing.T) {
+func TestLoadForEditKeepsLegacyStepFunMigrationInMemoryUntilSave(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	cfg := Default()
 	stepfun, ok := CuratedProviderPreset("stepfun")
@@ -184,7 +184,17 @@ func TestLoadForEditPersistsLegacyStepFunBaseURLMigration(t *testing.T) {
 
 	var disk Config
 	if _, err := toml.DecodeFile(path, &disk); err != nil {
-		t.Fatalf("decode persisted config: %v", err)
+		t.Fatalf("decode config after read-only load: %v", err)
+	}
+	if got, _ := disk.Provider("stepfun"); got == nil || got.BaseURL != legacyStepFunOpenAIBaseURL {
+		t.Fatalf("read-only LoadForEdit rewrote stepfun = %+v, want legacy base URL preserved on disk", got)
+	}
+	if err := loaded.SaveTo(path); err != nil {
+		t.Fatalf("explicit SaveTo: %v", err)
+	}
+	disk = Config{}
+	if _, err := toml.DecodeFile(path, &disk); err != nil {
+		t.Fatalf("decode explicitly saved config: %v", err)
 	}
 	if got, _ := disk.Provider("stepfun"); got == nil || got.BaseURL != officialStepFunOpenAIBaseURL {
 		t.Fatalf("persisted stepfun = %+v, want official base URL", got)
@@ -500,7 +510,7 @@ func TestNormalizeLegacyKimiK3CatalogPreservesVisionChoices(t *testing.T) {
 	}
 }
 
-func TestLoadForEditPersistsLegacyKimiK3CatalogMigration(t *testing.T) {
+func TestLoadForEditKeepsLegacyKimiK3CatalogMigrationInMemoryUntilSave(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	cfg := Default()
 	preset, ok := CuratedProviderPreset("kimi-cn")
@@ -523,15 +533,26 @@ func TestLoadForEditPersistsLegacyKimiK3CatalogMigration(t *testing.T) {
 	}
 	var disk Config
 	if _, err := toml.DecodeFile(path, &disk); err != nil {
-		t.Fatalf("decode persisted config: %v", err)
+		t.Fatalf("decode config after read-only load: %v", err)
 	}
 	persisted, ok := disk.Provider("kimi-cn")
+	if !ok || persisted.HasModel("kimi-k3") {
+		t.Fatalf("read-only LoadForEdit rewrote kimi-cn = %+v, want legacy catalog preserved on disk", persisted)
+	}
+	if err := loaded.SaveTo(path); err != nil {
+		t.Fatalf("explicit SaveTo: %v", err)
+	}
+	disk = Config{}
+	if _, err := toml.DecodeFile(path, &disk); err != nil {
+		t.Fatalf("decode explicitly saved config: %v", err)
+	}
+	persisted, ok = disk.Provider("kimi-cn")
 	if !ok || !persisted.HasModel("kimi-k3") || persisted.ModelOverrides["kimi-k3"].DefaultEffort != "max" {
 		t.Fatalf("persisted kimi-cn = %+v, want K3 defaults", persisted)
 	}
 }
 
-func TestLoadForEditPersistsLegacyOpenCodeGoKimiK3CatalogMigration(t *testing.T) {
+func TestLoadForEditKeepsLegacyOpenCodeGoKimiK3CatalogMigrationInMemoryUntilSave(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	cfg := Default()
 	preset, ok := CuratedProviderPreset("opencode-go")
@@ -559,9 +580,20 @@ func TestLoadForEditPersistsLegacyOpenCodeGoKimiK3CatalogMigration(t *testing.T)
 
 	var disk Config
 	if _, err := toml.DecodeFile(path, &disk); err != nil {
-		t.Fatalf("decode persisted config: %v", err)
+		t.Fatalf("decode config after read-only load: %v", err)
 	}
 	persisted, ok := disk.Provider("opencode-go")
+	if !ok || persisted.HasModel("kimi-k3") {
+		t.Fatalf("read-only LoadForEdit rewrote opencode-go = %+v, want legacy catalog preserved on disk", persisted)
+	}
+	if err := loaded.SaveTo(path); err != nil {
+		t.Fatalf("explicit SaveTo: %v", err)
+	}
+	disk = Config{}
+	if _, err := toml.DecodeFile(path, &disk); err != nil {
+		t.Fatalf("decode explicitly saved config: %v", err)
+	}
+	persisted, ok = disk.Provider("opencode-go")
 	if !ok || !persisted.HasModel("kimi-k3") || !persisted.HasVisionModel("kimi-k3") {
 		t.Fatalf("persisted opencode-go = %+v, want Kimi K3 catalog", persisted)
 	}

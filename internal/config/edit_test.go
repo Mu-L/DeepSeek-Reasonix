@@ -2,13 +2,16 @@ package config
 
 import (
 	"bytes"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/BurntSushi/toml"
 )
@@ -1522,6 +1525,64 @@ reasoning_language = "zh"
 	}
 }
 
+func TestRetiredConfigMigrationRequiresConfigFileLock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	const original = "[agent]\nmemory_compiler = \"compact\"\n"
+	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	release, err := acquireConfigFileEditLockWithTimeout(path, time.Second)
+	if err != nil {
+		t.Fatalf("hold config file lock: %v", err)
+	}
+	defer release()
+
+	previousTimeout := configEditLockTimeout
+	configEditLockTimeout = 30 * time.Millisecond
+	t.Cleanup(func() { configEditLockTimeout = previousTimeout })
+
+	changed, err := migrateLegacyMemoryCompilerFile(path)
+	if err == nil || changed {
+		t.Fatalf("migration while file lock held = (%v, %v), want unchanged lock error", changed, err)
+	}
+	got, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(got) != original {
+		t.Fatalf("blocked migration changed config:\n%s", got)
+	}
+}
+
+func TestLegacyMCPTierMigrationRequiresConfigFileLock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	const original = "[[plugins]]\nname = \"playwright\"\ntier = \"lazy\"\n"
+	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	release, err := acquireConfigFileEditLockWithTimeout(path, time.Second)
+	if err != nil {
+		t.Fatalf("hold config file lock: %v", err)
+	}
+	defer release()
+
+	previousTimeout := configEditLockTimeout
+	configEditLockTimeout = 30 * time.Millisecond
+	t.Cleanup(func() { configEditLockTimeout = previousTimeout })
+
+	err = migrateLegacyMCPTiersFile(path)
+	if err == nil {
+		t.Fatal("migration succeeded while another process-equivalent config transaction held the file lock")
+	}
+	got, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(got) != original {
+		t.Fatalf("blocked migration changed config:\n%s", got)
+	}
+}
+
 // TestMigrateLegacyMemoryCompilerKeepsMultilineSystemPrompt reproduces the
 // review finding: a multiline system_prompt quoting a `memory_compiler = ...`
 // example line must survive the retired-key migration byte-for-byte.
@@ -2514,5 +2575,284 @@ func TestEffortCapabilityEmptySupportedEffortsNotConfigurable(t *testing.T) {
 	e2.SupportedEfforts = []string{}
 	if cap := EffortCapabilityForEntry(&e2); cap.Supported {
 		t.Fatalf("empty supported_efforts should also fall through to the heuristic, got %+v", cap)
+	}
+}
+
+func TestWriteFilePreservesSymlinkToWritableTarget(t *testing.T) {
+	home := t.TempDir()
+	targetDir := t.TempDir()
+	t.Setenv("REASONIX_HOME", home)
+	target := filepath.Join(targetDir, "target.toml")
+	link := UserConfigPath()
+	if err := os.WriteFile(target, []byte("default_model = \"old\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks are unavailable: %v", err)
+	}
+
+	cfg := Default()
+	cfg.DefaultModel = "deepseek-pro"
+	if err := cfg.WriteFile(link); err != nil {
+		t.Fatalf("WriteFile through symlink: %v", err)
+	}
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatal("WriteFile replaced the config symlink")
+	}
+	var persisted Config
+	if _, err := toml.DecodeFile(target, &persisted); err != nil {
+		t.Fatalf("decode target: %v", err)
+	}
+	if persisted.DefaultModel != "deepseek-pro" {
+		t.Fatalf("target default_model = %q, want deepseek-pro", persisted.DefaultModel)
+	}
+}
+
+func TestSaveToPreservesMultiLevelSymlinkChain(t *testing.T) {
+	home := t.TempDir()
+	targetDir := t.TempDir()
+	t.Setenv("REASONIX_HOME", home)
+	target := filepath.Join(targetDir, "target.toml")
+	first := filepath.Join(targetDir, "first.toml")
+	second := UserConfigPath()
+	if err := os.WriteFile(target, []byte("default_model = \"old\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, first); err != nil {
+		t.Skipf("symlinks are unavailable: %v", err)
+	}
+	if err := os.Symlink(first, second); err != nil {
+		t.Skipf("symlink chains are unavailable: %v", err)
+	}
+
+	resolvedTarget, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := resolveConfigAccessPath(second, true)
+	if err != nil {
+		t.Fatalf("resolveConfigAccessPath(second): %v", err)
+	}
+	if got != resolvedTarget {
+		t.Fatalf("resolveConfigAccessPath(second) = %q, want %q", got, resolvedTarget)
+	}
+
+	cfg := Default()
+	cfg.DefaultModel = "deepseek-pro"
+	if err := cfg.SaveTo(second); err != nil {
+		t.Fatalf("SaveTo through symlink chain: %v", err)
+	}
+	for name, path := range map[string]string{"first": first, "second": second} {
+		info, err := os.Lstat(path)
+		if err != nil {
+			t.Fatalf("Lstat(%s): %v", name, err)
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("SaveTo replaced the %s symlink", name)
+		}
+	}
+	var persisted Config
+	if _, err := toml.DecodeFile(target, &persisted); err != nil {
+		t.Fatalf("decode target: %v", err)
+	}
+	if persisted.DefaultModel != "deepseek-pro" {
+		t.Fatalf("target default_model = %q, want deepseek-pro", persisted.DefaultModel)
+	}
+}
+
+// makeDirReadOnly makes a directory non-writable using the platform's real
+// permission mechanism. Windows directory read-only attributes do not block
+// writes, so the test must use an ACL there.
+func makeDirReadOnly(dir string) (func(), error) {
+	if runtime.GOOS == "windows" {
+		const everyoneSID = "*S-1-1-0"
+		if err := exec.Command("icacls", dir, "/deny", everyoneSID+":(W)").Run(); err != nil {
+			return nil, fmt.Errorf("icacls /deny: %w", err)
+		}
+		return func() {
+			_ = exec.Command("icacls", dir, "/remove:d", everyoneSID).Run()
+		}, nil
+	}
+
+	info, err := os.Stat(dir)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.Chmod(dir, 0o555); err != nil {
+		return nil, err
+	}
+	return func() { _ = os.Chmod(dir, info.Mode().Perm()) }, nil
+}
+
+func TestSaveToUnwritableUserSymlinkTargetPreservesLink(t *testing.T) {
+	home := t.TempDir()
+	targetDir := filepath.Join(t.TempDir(), "readonly")
+	t.Setenv("REASONIX_HOME", home)
+	target := filepath.Join(targetDir, "target.toml")
+	link := UserConfigPath()
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte("default_model = \"old\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks are unavailable: %v", err)
+	}
+
+	cleanup, err := makeDirReadOnly(targetDir)
+	if err != nil {
+		t.Fatalf("make target directory read-only: %v", err)
+	}
+	t.Cleanup(cleanup)
+
+	cfg := Default()
+	cfg.DefaultModel = "deepseek-pro"
+	if err := cfg.SaveTo(link); err == nil {
+		t.Fatal("SaveTo through symlink with unwritable target unexpectedly succeeded")
+	}
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatal("failed target write replaced the user config symlink")
+	}
+	var persisted Config
+	if _, err := toml.DecodeFile(target, &persisted); err != nil {
+		t.Fatalf("decode unchanged target config: %v", err)
+	}
+	if persisted.DefaultModel != "old" {
+		t.Fatalf("failed write changed target default_model to %q", persisted.DefaultModel)
+	}
+}
+
+func TestSaveToBrokenUserSymlinkFailsAndPreservesLink(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("REASONIX_HOME", home)
+	link := UserConfigPath()
+	missingTarget := filepath.Join(t.TempDir(), "missing", "target.toml")
+	if err := os.Symlink(missingTarget, link); err != nil {
+		t.Skipf("symlinks are unavailable: %v", err)
+	}
+
+	cfg := Default()
+	cfg.DefaultModel = "deepseek-pro"
+	if err := cfg.SaveTo(link); err == nil {
+		t.Fatal("SaveTo through broken user symlink unexpectedly succeeded")
+	}
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatal("failed write replaced the broken user config symlink")
+	}
+}
+
+func TestSaveToProjectSymlinkOutsideRootFailsWithoutReadingOrReplacing(t *testing.T) {
+	project := t.TempDir()
+	outside := t.TempDir()
+	target := filepath.Join(outside, "target.toml")
+	link := filepath.Join(project, "reasonix.toml")
+	const sentinel = "private_token = \"must-not-be-copied\"\n"
+	if err := os.WriteFile(target, []byte(sentinel), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks are unavailable: %v", err)
+	}
+	if _, err := LoadForRootReadOnly(project); err == nil {
+		t.Fatal("LoadForRootReadOnly accepted a project config symlink outside root")
+	}
+
+	cfg := Default()
+	cfg.DefaultModel = "deepseek-pro"
+	if err := cfg.SaveTo(link); err == nil {
+		t.Fatal("SaveTo through project symlink outside root unexpectedly succeeded")
+	}
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatal("failed project config write replaced the external symlink")
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != sentinel {
+		t.Fatalf("project config write changed outside target:\n%s", got)
+	}
+}
+
+func TestProjectConfigSymlinkWithinRootLoadsAndSavesTarget(t *testing.T) {
+	project := t.TempDir()
+	targetDir := filepath.Join(project, "config")
+	target := filepath.Join(targetDir, "reasonix.toml")
+	link := filepath.Join(project, "reasonix.toml")
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte("default_model = \"deepseek-pro\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join("config", "reasonix.toml"), link); err != nil {
+		t.Skipf("symlinks are unavailable: %v", err)
+	}
+
+	loaded, err := LoadForRootReadOnly(project)
+	if err != nil {
+		t.Fatalf("LoadForRootReadOnly through internal symlink: %v", err)
+	}
+	if loaded.DefaultModel != "deepseek-pro" {
+		t.Fatalf("loaded default_model = %q, want deepseek-pro", loaded.DefaultModel)
+	}
+	loaded.Agent.Temperature = 0.42
+	if err := loaded.SaveTo(link); err != nil {
+		t.Fatalf("SaveTo through internal project symlink: %v", err)
+	}
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatal("SaveTo replaced an internal project config symlink")
+	}
+	raw, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "temperature = 0.42") {
+		t.Fatalf("internal symlink target was not updated:\n%s", raw)
+	}
+}
+
+func TestBrokenProjectConfigSymlinkFailsLoadAndSave(t *testing.T) {
+	project := t.TempDir()
+	link := filepath.Join(project, "reasonix.toml")
+	if err := os.Symlink(filepath.Join("missing", "reasonix.toml"), link); err != nil {
+		t.Skipf("symlinks are unavailable: %v", err)
+	}
+
+	if _, err := LoadForRootReadOnly(project); err == nil {
+		t.Fatal("LoadForRootReadOnly accepted a broken project config symlink")
+	}
+	cfg := Default()
+	cfg.DefaultModel = "deepseek-pro"
+	if err := cfg.SaveTo(link); err == nil {
+		t.Fatal("SaveTo accepted a broken project config symlink")
+	}
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatal("failed operations replaced the broken project config symlink")
 	}
 }

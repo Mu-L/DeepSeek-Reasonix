@@ -182,6 +182,12 @@ type App struct {
 	tryRunMu     sync.Mutex
 	tryRunCancel context.CancelFunc
 
+	// updaterOperationMu guards the single native download/install operation.
+	// Checks are read-only and may overlap; cache mutation and installation fail
+	// fast when another updater operation is already active.
+	updaterOperationMu sync.Mutex
+	updaterOperationID string
+
 	// deferredRebuild tracks tabs whose settings were saved but whose runtime
 	// could not refresh because the session lease was held by another process.
 	deferredRebuild deferredRebuildState

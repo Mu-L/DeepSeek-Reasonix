@@ -3550,17 +3550,28 @@ func (m chatTUI) modeTagText() string {
 
 func (m *chatTUI) toggleVerboseReasoning(notify bool) {
 	m.showReasoning = !m.showReasoning
+	var saveErr error
 	if m.cfg != nil {
 		_ = m.cfg.SetShowReasoning(m.showReasoning)
-		_ = m.cfg.Save()
+		path := config.SourcePath()
+		if path == "" {
+			path = "reasonix.toml"
+		}
+		saveErr = config.EditConfigFile(path, func(cfg *config.Config) error {
+			return cfg.SetShowReasoning(m.showReasoning)
+		})
 	}
 	if !notify {
 		return
 	}
+	suffix := ""
+	if saveErr != nil {
+		suffix = "\npreference was not saved: " + saveErr.Error()
+	}
 	if m.showReasoning {
-		m.notice("verbose on — thinking text will be shown")
+		m.notice("verbose on — thinking text will be shown" + suffix)
 	} else {
-		m.notice("verbose off — thinking text will stay collapsed")
+		m.notice("verbose off — thinking text will stay collapsed" + suffix)
 	}
 }
 

@@ -562,7 +562,7 @@ var Chinese = Messages{
   reasonix hook list|status --json [--dir PATH]         查看脱敏 Hook 状态
   reasonix task list|show --json [--dir PATH]           查看脱敏 Task 状态
   reasonix bot start|doctor|weixin-login                多渠道 IM bot 网关
-  reasonix upgrade [--check] [--force]                   自更新到最新版本（也可用：reasonix update）
+  reasonix upgrade [stable|preview] [--check] [--force]  按已保存渠道自更新（高级用法：--channel；别名：reasonix update）
   reasonix version
   reasonix help
 
