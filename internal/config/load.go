@@ -42,6 +42,24 @@ func LoadForRootReadOnly(root string) (*Config, error) {
 	return loadForRoot(root, false)
 }
 
+// LoadUserConfigReadOnly loads only the trusted user-global config. It never
+// reads project reasonix.toml files and never performs on-disk migrations.
+// Host-owned features that may execute a configured binary should use this
+// instead of LoadForRoot so an untrusted checkout cannot choose the process.
+func LoadUserConfigReadOnly() (*Config, error) {
+	if SafeModeRequested() {
+		return loadSafeModeForRoot("."), nil
+	}
+	cfg := Default()
+	if path := userConfigLoadPath(); path != "" {
+		if err := mergeFile(cfg, path); err != nil {
+			return nil, err
+		}
+	}
+	normalizeConfigForEdit(cfg)
+	return cfg, nil
+}
+
 func loadForRoot(root string, migrateOnDisk bool) (*Config, error) {
 	root = resolveRoot(root)
 	if SafeModeRequested() {

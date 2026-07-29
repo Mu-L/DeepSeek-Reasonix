@@ -446,7 +446,7 @@ ok(
 
 ok(
   /commitThenSendRef\.current\(sourceTabId, trimmed, submitText\.trim\(\), structured\)/.test(appSource) &&
-    /sendToTab\(sourceTabId, displayText, submitText, undefined, structured\)/.test(appSource) &&
+    /sendToTab\(sourceTabId, displayText, submitText, undefined, structured, initialGoal\)/.test(appSource) &&
     /onSteer=\{handleSteer\}/.test(appSource) &&
     /composerInsertRequestsByTab\[activeTabId\]/.test(appSource) &&
     /consumedInsertIdByDraftRef\.current\[draftKey\]/.test(composerSource),

@@ -9,6 +9,7 @@ import { addBreadcrumb } from "./breadcrumbs";
 import { app, onEvent, onReady, onRuntimeRebuilt } from "./bridge";
 import { invalidateCache } from "./composerHistory";
 import { formatGuardianAssessmentNotice } from "./guardianEvents";
+import type { WorkbenchTargetToken } from "./goalSubmit";
 import { createRafBatch } from "./rafBatch";
 import { t, type DictKey } from "./i18n";
 import { sameTodoList } from "./todoVisibility";
@@ -2551,7 +2552,19 @@ export function useController() {
     replayPendingPromptsForActiveTab(activeTabId);
   }, [activeTabId]);
 
-  const sendToTab = useCallback(async (tabId: string, displayText: string, submitText = displayText, originalText?: string, structured?: import("./invocationDisplay").StructuredInvocationSubmit) => {
+  const sendToTab = useCallback(async (
+    tabId: string,
+    displayText: string,
+    submitText = displayText,
+    originalText?: string,
+    structured?: import("./invocationDisplay").StructuredInvocationSubmit,
+    initialGoal?: {
+      goal: string;
+      target: WorkbenchTargetToken;
+      collaborationMode: CollaborationMode;
+      toolApprovalMode: ToolApprovalMode;
+    },
+  ) => {
     if (!tabId) throw new Error(t("composer.workspaceStarting"));
     const currentState = getOrCreateState(statesRef.current, tabId);
     const runtime = currentState.meta?.runtime;
@@ -2559,17 +2572,37 @@ export function useController() {
       throw new Error(runtime?.issue?.message || currentState.meta.startupErr || t("composer.workspaceStarting"));
     }
     const seq = currentState.seq;
+    const promptEpoch = currentState.promptEpoch;
     const display = displayText.trim();
     const submit = submitText.trim();
     const original = originalText?.trim() ?? "";
     dispatchTo(tabId, { type: "user", text: displayText, submitText: display !== submit ? submit : undefined, seq });
     invalidateCache();
     try {
-      const submitPromise = structured
+      const submitPromise = initialGoal
+        ? app.SubmitInitialGoalToTab(
+            tabId,
+            initialGoal.goal,
+            structured?.display.trim() || display,
+            structured?.input.trim() || submit,
+            structured?.invocations ?? [],
+            initialGoal.collaborationMode,
+            initialGoal.toolApprovalMode,
+            initialGoal.target.kind,
+            initialGoal.target.identityGen,
+            initialGoal.target.requestSeq,
+          )
+        : structured
         ? app.SubmitInvocationsToTab(tabId, structured.display.trim(), structured.input.trim(), structured.invocations)
         : original
         ? app.SubmitEditedDisplayToTab(tabId, display, submit, original)
         : display !== submit ? app.SubmitDisplayToTab(tabId, display, submit) : app.SubmitToTab(tabId, submit);
+      if (initialGoal) {
+        const drained = await submitPromise;
+        const ids = Array.isArray(drained) ? drained : [];
+        if (ids.length) dispatchTo(tabId, { type: "approval_drained", ids, epoch: promptEpoch });
+        return;
+      }
       void submitPromise.catch((error) => {
         dispatchTo(tabId, { type: "send_failed", error: `Send failed: ${error instanceof Error ? error.message : String(error)}` });
       });
@@ -2768,6 +2801,7 @@ export function useController() {
     collaborationMode: CollaborationMode,
     toolApprovalMode: ToolApprovalMode,
     goal: string,
+    options?: { propagateError?: boolean },
   ): Promise<boolean> => {
     if (!tabId) return false;
     const state = statesRef.current.get(tabId);
@@ -2796,10 +2830,11 @@ export function useController() {
           toolApprovalMode,
           goal,
         );
-      } catch {
+      } catch (error) {
         if ((composerProfileLifecycleByTabRef.current.get(tabId) ?? 0) === lifecycle) {
           await refreshMetaForTab(tabId);
         }
+        if (options?.propagateError) throw error;
         return false;
       }
       if ((composerProfileLifecycleByTabRef.current.get(tabId) ?? 0) !== lifecycle) return false;
@@ -2825,8 +2860,13 @@ export function useController() {
 
   const setGoalForTab = useCallback(async (tabId: string, goal: string): Promise<void> => {
     if (!tabId) return;
-    await app.SetGoalForTab(tabId, goal).catch(() => {});
-    await refreshMetaForTab(tabId);
+    // Propagate activation failures so the first Goal turn (especially structured
+    // Skill submit) can abort instead of executing without an active Goal.
+    try {
+      await app.SetGoalForTab(tabId, goal);
+    } finally {
+      await refreshMetaForTab(tabId);
+    }
   }, [refreshMetaForTab]);
 
   const setGoal = useCallback(async (goal: string): Promise<void> => {
@@ -2836,8 +2876,11 @@ export function useController() {
 
   const clearGoalForTab = useCallback(async (tabId: string): Promise<void> => {
     if (!tabId) return;
-    await app.ClearGoalForTab(tabId).catch(() => {});
-    await refreshMetaForTab(tabId);
+    try {
+      await app.ClearGoalForTab(tabId);
+    } finally {
+      await refreshMetaForTab(tabId);
+    }
   }, [refreshMetaForTab]);
 
   const clearGoal = useCallback(async (): Promise<void> => {

@@ -304,6 +304,79 @@ func TestSubmitInvocationDisplayRunsInlineSkillWithoutArguments(t *testing.T) {
 	}
 }
 
+func TestSubmitInvocationDisplayRunsInlineSkillInsideActiveGoal(t *testing.T) {
+	prov := &scriptedTurns{turns: [][]provider.Chunk{
+		textTurn("Notes listed.\n\n[goal:complete]"),
+	}}
+	ag := agent.New(prov, tool.NewRegistry(), agent.NewSession(""), agent.Options{}, event.Discard)
+	events := make(chan event.Event, 8)
+	c := New(Options{
+		Runner:   ag,
+		Executor: ag,
+		Sink: event.FuncSink(func(e event.Event) {
+			if e.Kind == event.TurnDone || e.Kind == event.Notice {
+				events <- e
+			}
+		}),
+		Skills: []skill.Skill{{Name: "notes", Body: "INSPECT_NOTES", RunAs: skill.RunInline, Scope: skill.ScopeGlobal}},
+	})
+	defer c.Close()
+	c.SetGoalWithResearchMode("list the existing notes", GoalResearchOff)
+	c.SubmitInvocationDisplay(
+		"list the existing notes",
+		"list the existing notes",
+		[]InvocationRequest{{Name: "notes", Kind: "skill", Offset: 0}},
+	)
+	waitForTurnDone(t, events)
+
+	if prov.call != 1 {
+		t.Fatalf("active Goal structured turns = %d, want 1", prov.call)
+	}
+	input := firstUserMessage(ag.Session().Messages)
+	for _, want := range []string{"<active-goal>\nlist the existing notes", "INSPECT_NOTES", "list the existing notes"} {
+		if !strings.Contains(input, want) {
+			t.Fatalf("active Goal structured input missing %q: %q", want, input)
+		}
+	}
+}
+
+func TestSubmitInvocationDisplayRunsSubagentSkillInsideActiveGoal(t *testing.T) {
+	sess := agent.NewSession("")
+	exec := agent.New(nil, tool.NewRegistry(), sess, agent.Options{}, event.Discard)
+	events := make(chan event.Event, 8)
+	var gotTask string
+	c := New(Options{
+		Executor: exec,
+		Sink: event.FuncSink(func(e event.Event) {
+			if e.Kind == event.TurnDone || e.Kind == event.Notice {
+				events <- e
+			}
+		}),
+		Skills: []skill.Skill{{
+			Name: "research", Body: "RESEARCH_NOTES", RunAs: skill.RunSubagent, Scope: skill.ScopeGlobal,
+		}},
+		SkillRunner: func(_ context.Context, _ skill.Skill, task string, _ skill.SubagentRunOptions) (string, error) {
+			gotTask = task
+			return "Notes listed.\n\n[goal:complete]", nil
+		},
+	})
+	defer c.Close()
+	c.SetGoalWithResearchMode("list the existing notes", GoalResearchOff)
+	c.SubmitInvocationDisplay(
+		"list the existing notes",
+		"list the existing notes",
+		[]InvocationRequest{{Name: "research", Kind: "subagent", Offset: 0}},
+	)
+	waitForTurnDone(t, events)
+
+	if !strings.Contains(gotTask, "<active-goal>\nlist the existing notes") {
+		t.Fatalf("active Goal subagent task missing goal: %q", gotTask)
+	}
+	if !strings.Contains(gotTask, "list the existing notes") {
+		t.Fatalf("active Goal subagent task missing user task: %q", gotTask)
+	}
+}
+
 func TestSubmitSlashSubagentUsesPermissionedRunnerInPlanMode(t *testing.T) {
 	sess := agent.NewSession("parent system")
 	exec := agent.New(nil, tool.NewRegistry(), sess, agent.Options{}, event.Discard)

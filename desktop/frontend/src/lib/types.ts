@@ -253,6 +253,29 @@ export interface TabMeta {
   cwd: string;
 }
 
+export interface TerminalSessionView {
+  id: string;
+  title: string;
+  shell: string;
+  cwd: string;
+  createdAt: number;
+  exitCode?: number;
+  running: boolean;
+}
+
+export interface TerminalShellView {
+  id: string;
+  label: string;
+}
+
+export interface TerminalWorkspaceView {
+  available: boolean;
+  readOnly: boolean;
+  reason?: string;
+  sessions: TerminalSessionView[];
+  shells: TerminalShellView[];
+}
+
 export interface ProjectNode {
   key: string;
   kind: "project" | "topic" | "session" | "global_folder" | "global_topic" | "global_session";

@@ -80,7 +80,7 @@ type WorkbenchTargetStateView struct {
 	HostID      string            `json:"hostId,omitempty"`
 	Workspace   string            `json:"workspace,omitempty"`
 	IdentityGen uint64            `json:"identityGen"`
-	RequestSeq  uint64            `json:"requestSeq,omitempty"`
+	RequestSeq  uint64            `json:"requestSeq"`
 	Error       string            `json:"error,omitempty"`
 	Reconnect   target.RemoteHint `json:"reconnect"`
 }

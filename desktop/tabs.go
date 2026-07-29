@@ -3013,6 +3013,11 @@ func (a *App) CloseTab(tabID string) error {
 		slog.Warn("desktop: session metadata before closing tab failed", "tab", tabID, "err", err)
 		return fmt.Errorf("save current session metadata before closing tab: %w", err)
 	}
+	// A terminal belongs to the visible chat tab, even when another tab points
+	// at the same project. Reap its PTY before removing the tab binding.
+	if a.terminals != nil {
+		a.terminals.closeForTab(tabID)
+	}
 
 	a.mu.Lock()
 	if current := a.tabs[tabID]; current != tab {
@@ -3953,6 +3958,8 @@ func (a *App) applySessionBindingToTab(tab *WorkspaceTab, binding sessionBinding
 	if tab == nil || binding.path == "" {
 		return
 	}
+	var terminalSessions []*terminalSession
+	reopenTerminalGate := false
 	scope := binding.scope
 	workspaceRoot := binding.workspaceRoot
 	if scope == "" {
@@ -3992,6 +3999,14 @@ func (a *App) applySessionBindingToTab(tab *WorkspaceTab, binding sessionBinding
 	// Spelling-only root updates still persist above, but an equivalent root is
 	// the same workspace — do not warn the user about a switch.
 	workspaceChanged := tab.Scope != scope || !sameProjectRoot(tab.WorkspaceRoot, workspaceRoot)
+	if workspaceChanged && current == tab && a.terminals != nil {
+		// A session binding can move a visible tab to another project. Invalidate
+		// the old terminal scope before publishing the new root so an in-flight
+		// shell start cannot register against the old workspace after this
+		// transition. Reopen only after the new binding is visible.
+		terminalSessions = a.terminals.detachForTab(tab.ID)
+		reopenTerminalGate = !tab.ReadOnly && !tab.removed
+	}
 	tab.Scope = scope
 	tab.WorkspaceRoot = workspaceRoot
 	tab.SessionPath = canonicalTabSessionPath(binding.path)
@@ -4009,6 +4024,12 @@ func (a *App) applySessionBindingToTab(tab *WorkspaceTab, binding sessionBinding
 	}
 	sink := tab.sink
 	a.mu.Unlock()
+	if reopenTerminalGate {
+		a.terminals.reopenForTab(tab.ID)
+	}
+	if len(terminalSessions) > 0 {
+		a.terminals.closeSessions(terminalSessions)
+	}
 	if workspaceChanged && sink != nil {
 		sink.Emit(event.Event{
 			Kind:  event.Notice,
