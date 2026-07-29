@@ -124,7 +124,15 @@ and its inputs, then verifies the node moved by the final rename. A process that
 recreates the target during repair wins: Guard does not overwrite the new file
 and reports that the confirmed state was moved aside. Pending-update rollback
 uses the complete confirmed transaction identity, not only its version or
-timestamp.
+timestamp. File updates keep `pending-update.json` immutable and record the
+complete installed release unit in a transaction-unique, create-only sidecar,
+so a crash cannot hide the rollback transaction between two state-file
+replacements.
 
-All state files are additive and optional. Older Reasonix releases ignore them;
-missing new fields decode to their safe zero values.
+New fields and sidecars are additive. Older Reasonix releases ignore unknown
+data, and current releases can still read legacy transactions with missing
+bindings. A missing binding is a safe zero value, not destructive
+authorization: automatic handoff, healthy commit, or app-bundle rollback fails
+closed when it cannot prove ownership. A legacy app-bundle backup without a
+tree digest can be restored only through an explicitly confirmed repair-plan
+preview that binds that exact backup.

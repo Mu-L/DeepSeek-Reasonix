@@ -848,9 +848,9 @@ func applyLinux(targz []byte, prepared *repair.UpdateTransaction) error {
 	if _, err := repair.RecordClaimedFileUpdateInstalled(claimed); err != nil {
 		return fmt.Errorf("update: record installed release unit: %w", err)
 	}
-	// The durable pending transaction now has a new identity containing every
-	// installed member state. A crash before this cleanup is still safe: startup
-	// sees that the old marker no longer matches and clears it without rollback.
+	// pending-update.json remains immutable; the transaction-unique sidecar now
+	// binds every installed member. A crash before marker cleanup is safe:
+	// startup correlates the exact transaction and rolls the release unit back.
 	_ = repair.ClearUpdateApplyFailureExact(claimed)
 	return nil
 }
