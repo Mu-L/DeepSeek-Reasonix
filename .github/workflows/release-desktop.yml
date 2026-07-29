@@ -432,7 +432,7 @@ jobs:
           MINISIGN_PRIVATE_KEY: ${{ secrets.MINISIGN_PRIVATE_KEY }}
           MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
         run: |
-          go run ./cmd/sign windows-payload ../signed-payload "${{ steps.ver.outputs.version }}"
+          go run ./cmd/sign windows-payload ../signed-payload "${{ needs.resolve.outputs.version }}"
           go run ./cmd/sign sign ../signed-payload/reasonix-payload.json
           go run ./cmd/sign verify ../signed-payload/reasonix-payload.json
 
