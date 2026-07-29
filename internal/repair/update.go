@@ -681,7 +681,7 @@ func PublishClaimedFileUpdateMember(claimed *UpdateTransaction, targetPath strin
 	stagePublished := false
 	defer func() {
 		if !stagePublished {
-			_ = os.Remove(stage)
+			_ = removeUpdateBackupFileMatching(stage, expectedHash)
 		}
 	}()
 
@@ -713,7 +713,23 @@ func PublishClaimedFileUpdateMember(claimed *UpdateTransaction, targetPath strin
 	}
 	stagePublished = true
 	if err := verifyRegularFileHash(member.TargetPath, expectedHash); err != nil {
-		return fmt.Errorf("publish file update: installed %s changed: %w", filepath.Base(member.TargetPath), err)
+		rejected, retainErr := moveRepairNodeToUniqueCleanup(member.TargetPath)
+		if retainErr != nil || rejected == "" {
+			if retainErr != nil {
+				return fmt.Errorf("publish file update: installed %s changed: %w; retain rejected file: %v", filepath.Base(member.TargetPath), err, retainErr)
+			}
+			return fmt.Errorf("publish file update: installed %s changed: %w; rejected file disappeared before compensation", filepath.Base(member.TargetPath), err)
+		}
+		if retained == "" {
+			return fmt.Errorf("publish file update: installed %s changed: %w; rejected file retained at %s", filepath.Base(member.TargetPath), err, rejected)
+		}
+		if verifyErr := verifyRepairPlanReleaseNodeStateFor(retained, member.TargetPath, preparedState); verifyErr != nil {
+			return fmt.Errorf("publish file update: installed %s changed: %w; rejected file retained at %s; prepared file changed at %s: %v", filepath.Base(member.TargetPath), err, rejected, retained, verifyErr)
+		}
+		if restoreErr := restoreRepairNodeIfAbsent(retained, member.TargetPath); restoreErr != nil {
+			return fmt.Errorf("publish file update: installed %s changed: %w; rejected file retained at %s; restore prepared file: %v", filepath.Base(member.TargetPath), err, rejected, restoreErr)
+		}
+		return fmt.Errorf("publish file update: installed %s changed: %w; rejected file retained at %s and prepared file restored", filepath.Base(member.TargetPath), err, rejected)
 	}
 	if retained != "" {
 		_ = removeUpdateNodeMatching(retained, func(moved string) error {
@@ -752,6 +768,13 @@ func verifyUpdateBackupFile(f UpdateTransactionFile) error {
 }
 
 func verifyRegularFileHash(path, expected string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("not a regular file")
+	}
 	actual, err := hashFile(path)
 	if err != nil {
 		return err
@@ -2044,7 +2067,8 @@ func rollbackPendingUpdateMatchingLocked(
 			(!callerConfirmedState || confirmedBackupState == "") {
 			return result, fmt.Errorf("rollback update: backup bundle identity is missing; explicit preview confirmation is required")
 		}
-		if _, err := os.Stat(tx.BackupPath); err != nil {
+		backupInfo, err := os.Lstat(tx.BackupPath)
+		if err != nil {
 			if os.IsNotExist(err) && strings.TrimSpace(tx.BackupTreeID) != "" {
 				actual, digestErr := repairPlanTreeContentStateID(tx.TargetPath)
 				if digestErr == nil && actual == tx.BackupTreeID {
@@ -2062,6 +2086,9 @@ func rollbackPendingUpdateMatchingLocked(
 				}
 			}
 			return result, fmt.Errorf("rollback update: backup bundle: %w", err)
+		}
+		if !backupInfo.IsDir() {
+			return result, fmt.Errorf("rollback update: backup bundle is not a directory")
 		}
 		if tx.BackupTreeID != "" {
 			actual, digestErr := repairPlanTreeContentStateID(tx.BackupPath)

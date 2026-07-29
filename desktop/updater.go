@@ -879,9 +879,7 @@ func applyWindowsFile(path, expectedSHA256 string, prepared *repair.UpdateTransa
 		expectedSHA256,
 		currentInstallDir(),
 		currentLauncherPath(),
-		prepared.ToVersion,
-		prepared.CreatedAt,
-		repair.UpdateTransactionID(prepared),
+		prepared,
 	)
 }
 

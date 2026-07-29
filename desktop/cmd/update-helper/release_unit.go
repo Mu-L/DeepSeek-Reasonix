@@ -17,8 +17,9 @@ type stagedFileUpdateMember struct {
 }
 
 // loadWindowsStagedReleaseUnit validates and reads the complete NSIS payload
-// before any live release-unit member is moved. Reasonix.exe is the portable
-// alias of reasonix-launcher.exe and intentionally reuses those staged bytes.
+// before any live release-unit member is moved. An existing Reasonix.exe is the
+// portable alias of reasonix-launcher.exe and reuses those staged bytes; an
+// installed package that did not have the alias remains unchanged.
 func loadWindowsStagedReleaseUnit(claimed *repair.UpdateTransaction, stagingDir string) ([]stagedFileUpdateMember, error) {
 	if claimed == nil || claimed.TargetKind != "file" || len(claimed.Files) == 0 {
 		return nil, fmt.Errorf("load staged release unit: transaction identity is incomplete")
@@ -48,6 +49,9 @@ func loadWindowsStagedReleaseUnit(claimed *repair.UpdateTransaction, stagingDir 
 			return nil, fmt.Errorf("load staged release unit: duplicate target %s", filepath.Base(targetPath))
 		}
 		seenTargets[targetKey] = struct{}{}
+		if strings.EqualFold(filepath.Base(targetPath), "Reasonix.exe") && file.MissingBefore {
+			continue
+		}
 
 		sourceName, err := windowsStagedSourceName(filepath.Base(targetPath))
 		if err != nil {

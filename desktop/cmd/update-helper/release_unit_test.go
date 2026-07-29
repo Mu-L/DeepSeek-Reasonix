@@ -81,6 +81,39 @@ func TestLoadWindowsStagedReleaseUnitRejectsIncompletePayloadBeforePublish(t *te
 	}
 }
 
+func TestLoadWindowsStagedReleaseUnitDoesNotCreateMissingPortableAlias(t *testing.T) {
+	staging := t.TempDir()
+	for name, content := range map[string]string{
+		"reasonix-desktop.exe":  "desktop-v2",
+		"reasonix-launcher.exe": "launcher-v2",
+	} {
+		if err := os.WriteFile(filepath.Join(staging, name), []byte(content), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	installDir := t.TempDir()
+	claimed := &repair.UpdateTransaction{
+		SchemaVersion: 1,
+		TargetKind:    "file",
+		TargetPath:    filepath.Join(installDir, "reasonix-desktop.exe"),
+		Files: []repair.UpdateTransactionFile{
+			{TargetPath: filepath.Join(installDir, "reasonix-desktop.exe")},
+			{TargetPath: filepath.Join(installDir, "reasonix-launcher.exe")},
+			{TargetPath: filepath.Join(installDir, "Reasonix.exe"), MissingBefore: true},
+		},
+	}
+
+	members, err := loadWindowsStagedReleaseUnit(claimed, staging)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, member := range members {
+		if strings.EqualFold(filepath.Base(member.targetPath), "Reasonix.exe") {
+			t.Fatalf("missing portable alias was added to publish set: %+v", members)
+		}
+	}
+}
+
 func TestPublishLoadedFileUpdateReleaseUnitStopsOnFirstFailedCompareAndPublish(t *testing.T) {
 	claimed := &repair.UpdateTransaction{TargetKind: "file"}
 	members := []stagedFileUpdateMember{

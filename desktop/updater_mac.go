@@ -31,7 +31,7 @@ var (
 	// Test seams keep desktop tests independent of a real signed bundle and the
 	// process executable path used by repair transaction validation.
 	openCommand = func(args ...string) *exec.Cmd {
-		return exec.Command("open", args...)
+		return exec.Command("/usr/bin/open", args...)
 	}
 	readMacUpdateHandoff         = repair.ReadPendingUpdate
 	claimMacUpdateHandoff        = repair.ClaimPendingAppBundleUpdateHandoffExact
@@ -41,7 +41,7 @@ var (
 	cleanupMacHandoffStaging     = repair.CleanupAppBundleUpdateHandoffStaging
 	cleanupMacHandoffReplacement = repair.CleanupAppBundleUpdateReplacement
 	macHandoffCopy               = func(oldPath, newPath string) error {
-		return exec.Command("ditto", oldPath, newPath).Run()
+		return exec.Command("/usr/bin/ditto", oldPath, newPath).Run()
 	}
 	macHandoffRename = func(oldPath, newPath string) error {
 		return unix.RenameatxNp(unix.AT_FDCWD, oldPath, unix.AT_FDCWD, newPath, unix.RENAME_EXCL)
@@ -77,7 +77,7 @@ func applyMac(zipPath, targetVersion string) error {
 			_ = cleanupOwnedMacUpdateDirectory(staging, stagingOwner)
 		}
 	}()
-	if err := exec.Command("ditto", "-x", "-k", zipPath, staging).Run(); err != nil {
+	if err := exec.Command("/usr/bin/ditto", "-x", "-k", zipPath, staging).Run(); err != nil {
 		return fmt.Errorf("extract macOS update: %w", err)
 	}
 	nextApp, err := findMacApp(staging)
@@ -334,7 +334,7 @@ func runMacUpdateHandoff(cfg macUpdateHandoffConfig) int {
 		if clearErr := clearPending(); clearErr != nil {
 			return fmt.Errorf("clear restored update handoff: %w", clearErr)
 		}
-		_ = exec.Command("xattr", "-dr", "com.apple.quarantine", oldApp).Run()
+		_ = exec.Command("/usr/bin/xattr", "-dr", "com.apple.quarantine", oldApp).Run()
 		if err := openCommand("-n", oldApp).Run(); err != nil {
 			_ = openCommand(oldApp).Run()
 		}
@@ -438,7 +438,7 @@ func runMacUpdateHandoff(cfg macUpdateHandoffConfig) int {
 		}
 		return 1
 	}
-	_ = exec.Command("xattr", "-dr", "com.apple.quarantine", oldApp).Run()
+	_ = exec.Command("/usr/bin/xattr", "-dr", "com.apple.quarantine", oldApp).Run()
 	if err := openCommand("-n", oldApp).Run(); err != nil {
 		logf("LaunchServices rejected the replacement app bundle: %v", err)
 		if rollbackErr := rollback(); rollbackErr != nil {
@@ -600,10 +600,10 @@ func verifyMacApp(appPath string) error {
 	if got := strings.TrimSpace(string(out)); got != macBundleID {
 		return fmt.Errorf("update: bundle identifier %q does not match %q", got, macBundleID)
 	}
-	if err := exec.Command("codesign", "--verify", "--deep", "--strict", appPath).Run(); err != nil {
+	if err := exec.Command("/usr/bin/codesign", "--verify", "--deep", "--strict", appPath).Run(); err != nil {
 		return fmt.Errorf("verify macOS code signature: %w", err)
 	}
-	if err := exec.Command("spctl", "--assess", "--type", "execute", appPath).Run(); err != nil {
+	if err := exec.Command("/usr/sbin/spctl", "--assess", "--type", "execute", appPath).Run(); err != nil {
 		return fmt.Errorf("assess macOS notarization: %w", err)
 	}
 	return nil

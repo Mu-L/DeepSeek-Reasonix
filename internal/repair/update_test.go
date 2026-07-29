@@ -460,6 +460,72 @@ func TestRepairPlanCanConfirmLegacyAppBundleRollbackWithoutTreeDigest(t *testing
 	}
 }
 
+func TestRepairPlanRejectsLegacyAppBundleSymlinkBackupBeforeMutation(t *testing.T) {
+	t.Setenv("REASONIX_HOME", t.TempDir())
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := filepath.Join(dir, "Reasonix.app")
+	exe := filepath.Join(app, "Contents", "MacOS", "Reasonix")
+	if err := os.MkdirAll(filepath.Dir(exe), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(exe, []byte("old"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	originalExecutable := repairExecutable
+	repairExecutable = func() (string, error) { return exe, nil }
+	t.Cleanup(func() { repairExecutable = originalExecutable })
+
+	backup := app + ".reasonix-update-backup"
+	tx, err := PrepareAppBundleUpdate("v1", "v2", app, backup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx.BackupTreeID = ""
+	if err := WritePendingUpdate(tx); err != nil {
+		t.Fatal(err)
+	}
+	external := filepath.Join(dir, "external-backup")
+	if err := os.Rename(app, external); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(external, backup); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	plan := RepairPlan{
+		SchemaVersion: RepairPlanSchemaVersion,
+		Summary:       "restore legacy app backup",
+		Actions: []RepairPlanAction{{
+			Type:   "rollback_update",
+			Reason: "explicitly confirmed recovery",
+		}},
+	}
+	preview, err := PreviewRepairPlan(plan, ApplyPlanOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = ApplyRepairPlan(plan, ApplyPlanOptions{
+		ExpectedPreviewID: RepairPlanPreviewID(plan, preview),
+	})
+	if err == nil || !strings.Contains(err.Error(), "backup bundle is not a directory") {
+		t.Fatalf("legacy symlink backup rollback = %v", err)
+	}
+	if got, err := os.Readlink(backup); err != nil || got != external {
+		t.Fatalf("backup symlink changed before rejection: %q, %v", got, err)
+	}
+	if _, err := os.Lstat(app); !os.IsNotExist(err) {
+		t.Fatalf("live app path changed before rejection: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(external, "Contents", "MacOS", "Reasonix")); err != nil || string(got) != "old" {
+		t.Fatalf("external backup changed: %q, %v", got, err)
+	}
+	if !HasPendingUpdate() {
+		t.Fatal("rejected legacy symlink backup removed pending state")
+	}
+}
+
 func TestRollbackPendingUpdateRejectsUnexpectedVersion(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("REASONIX_HOME", home)
@@ -1358,7 +1424,7 @@ func TestRecoverFailedInstallPreservesMarkerRecreatedDuringCleanup(t *testing.T)
 	updateCleanupAfterRename = func(oldpath, _ string) {
 		if !injected && oldpath == updateApplyFailurePath() {
 			injected = true
-			if err := MarkUpdateApplyFailed("v3", "new failure"); err != nil {
+			if err := markUpdateApplyFailed("v3", "", "", "new failure"); err != nil {
 				t.Errorf("recreate failure marker: %v", err)
 			}
 		}
@@ -1395,7 +1461,7 @@ func TestRecoverFailedInstallIgnoresMarkerForAnotherVersion(t *testing.T) {
 	if err := os.WriteFile(target, []byte("v3"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := MarkUpdateApplyFailed("v2", "stale installer failure"); err != nil {
+	if err := markUpdateApplyFailed("v2", "", "", "stale installer failure"); err != nil {
 		t.Fatal(err)
 	}
 	result, failure, err := RecoverFailedInstall()
@@ -1411,6 +1477,52 @@ func TestRecoverFailedInstallIgnoresMarkerForAnotherVersion(t *testing.T) {
 	}
 	if _, ok := ReadUpdateApplyFailure(); ok {
 		t.Fatal("stale failure marker was not cleared")
+	}
+}
+
+func TestMarkUpdateApplyFailedPreservesNewMarkerAfterPendingReplacement(t *testing.T) {
+	t.Setenv("REASONIX_HOME", t.TempDir())
+	dir := t.TempDir()
+	target := filepath.Join(dir, "reasonix-desktop")
+	guard := filepath.Join(dir, "reasonix-guard")
+	originalExecutable := repairExecutable
+	repairExecutable = func() (string, error) { return guard, nil }
+	t.Cleanup(func() { repairExecutable = originalExecutable })
+	if err := os.WriteFile(target, []byte("v1"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	first, err := PrepareFileUpdate("v1", "v2", target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := *first
+	second.CreatedAt = time.Now().UTC().Add(time.Second).Format(time.RFC3339Nano)
+
+	originalLock := acquirePendingUpdateLock
+	var hookErr error
+	acquirePendingUpdateLock = func() (func(), error) {
+		if hookErr = WritePendingUpdate(&second); hookErr == nil {
+			hookErr = MarkUpdateApplyFailedExact(&second, "new transaction failed")
+		}
+		return func() {}, nil
+	}
+	t.Cleanup(func() { acquirePendingUpdateLock = originalLock })
+
+	if err := MarkUpdateApplyFailed(first.ToVersion, "old transaction failed"); err == nil ||
+		!strings.Contains(err.Error(), "changed while waiting") {
+		t.Fatalf("stale failure marker creation = %v", err)
+	}
+	if hookErr != nil {
+		t.Fatalf("replace pending transaction and marker: %v", hookErr)
+	}
+	failure, ok := ReadUpdateApplyFailure()
+	if !ok || failure.UpdateTransactionID != UpdateTransactionID(&second) ||
+		failure.Reason != "new transaction failed" {
+		t.Fatalf("new transaction marker = %+v, present=%v", failure, ok)
+	}
+	current, err := ReadPendingUpdate()
+	if err != nil || UpdateTransactionID(current) != UpdateTransactionID(&second) {
+		t.Fatalf("pending transaction = %+v, %v", current, err)
 	}
 }
 
@@ -3011,6 +3123,138 @@ func TestPublishClaimedFileUpdateMemberPreservesConcurrentRecreate(t *testing.T)
 	}
 	if !HasPendingUpdate() {
 		t.Fatal("failed member publish removed pending recovery state")
+	}
+}
+
+func TestPublishClaimedFileUpdateMemberRestoresPreparedFileWhenStageSwapped(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("REASONIX_HOME", home)
+	dir := t.TempDir()
+	target := filepath.Join(dir, "reasonix-desktop")
+	guard := filepath.Join(dir, "reasonix-guard")
+	originalExecutable := repairExecutable
+	repairExecutable = func() (string, error) { return guard, nil }
+	t.Cleanup(func() { repairExecutable = originalExecutable })
+	if err := os.WriteFile(target, []byte("old"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := PrepareFileUpdate("v1", "v2", target)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	originalHook := fileUpdateAfterRetain
+	var hookErr error
+	fileUpdateAfterRetain = func(_, _ string) {
+		stages, err := filepath.Glob(filepath.Join(dir, ".reasonix-desktop.reasonix-update-stage-*"))
+		if err != nil {
+			hookErr = err
+			return
+		}
+		if len(stages) != 1 {
+			hookErr = errors.New("unexpected staged update file count")
+			return
+		}
+		if err := os.Remove(stages[0]); err != nil {
+			hookErr = err
+			return
+		}
+		hookErr = os.WriteFile(stages[0], []byte("tampered-stage"), 0o700)
+	}
+	t.Cleanup(func() { fileUpdateAfterRetain = originalHook })
+
+	err = PublishClaimedFileUpdateMember(claimed, target, []byte("new"), 0o700)
+	if err == nil || !strings.Contains(err.Error(), "installed reasonix-desktop changed") {
+		t.Fatalf("stage-swapped member publish = %v", err)
+	}
+	if hookErr != nil {
+		t.Fatalf("replace staged update: %v", hookErr)
+	}
+	if got, err := os.ReadFile(target); err != nil || string(got) != "old" {
+		t.Fatalf("restored target = %q, %v", got, err)
+	}
+	rejected, err := filepath.Glob(target + ".reasonix-cleanup-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rejected) != 1 {
+		t.Fatalf("retained rejected files = %v", rejected)
+	}
+	if got, err := os.ReadFile(rejected[0]); err != nil || string(got) != "tampered-stage" {
+		t.Fatalf("retained rejected file = %q, %v", got, err)
+	}
+	aside := target + ".reasonix-update-aside-" + UpdateTransactionID(claimed)[:16]
+	if _, err := os.Lstat(aside); !os.IsNotExist(err) {
+		t.Fatalf("restored prior target remained aside: %v", err)
+	}
+	if !HasPendingUpdate() {
+		t.Fatal("stage-swapped member publish removed pending recovery state")
+	}
+}
+
+func TestPublishClaimedFileUpdateMemberRejectsSameContentStageSymlink(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("REASONIX_HOME", home)
+	dir := t.TempDir()
+	target := filepath.Join(dir, "reasonix-desktop")
+	guard := filepath.Join(dir, "reasonix-guard")
+	originalExecutable := repairExecutable
+	repairExecutable = func() (string, error) { return guard, nil }
+	t.Cleanup(func() { repairExecutable = originalExecutable })
+	if err := os.WriteFile(target, []byte("old"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := PrepareFileUpdate("v1", "v2", target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	external := filepath.Join(t.TempDir(), "external-new")
+	if err := os.WriteFile(external, []byte("new"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	originalHook := fileUpdateAfterRetain
+	var hookErr error
+	fileUpdateAfterRetain = func(_, _ string) {
+		stages, err := filepath.Glob(filepath.Join(dir, ".reasonix-desktop.reasonix-update-stage-*"))
+		if err != nil {
+			hookErr = err
+			return
+		}
+		if len(stages) != 1 {
+			hookErr = errors.New("unexpected staged update file count")
+			return
+		}
+		if err := os.Remove(stages[0]); err != nil {
+			hookErr = err
+			return
+		}
+		hookErr = os.Symlink(external, stages[0])
+	}
+	t.Cleanup(func() { fileUpdateAfterRetain = originalHook })
+
+	err = PublishClaimedFileUpdateMember(claimed, target, []byte("new"), 0o700)
+	if hookErr != nil {
+		t.Skipf("replace staged update with symlink: %v", hookErr)
+	}
+	if err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("symlink-swapped member publish = %v", err)
+	}
+	if got, err := os.ReadFile(target); err != nil || string(got) != "old" {
+		t.Fatalf("restored target = %q, %v", got, err)
+	}
+	rejected, err := filepath.Glob(target + ".reasonix-cleanup-*")
+	if err != nil || len(rejected) != 1 {
+		t.Fatalf("retained rejected symlinks = %v, %v", rejected, err)
+	}
+	if got, err := os.Readlink(rejected[0]); err != nil || got != external {
+		t.Fatalf("retained rejected symlink = %q, %v", got, err)
+	}
+	if got, err := os.ReadFile(external); err != nil || string(got) != "new" {
+		t.Fatalf("external file changed = %q, %v", got, err)
+	}
+	if !HasPendingUpdate() {
+		t.Fatal("symlink-swapped member publish removed pending recovery state")
 	}
 }
 

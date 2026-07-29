@@ -37,13 +37,29 @@ func updateApplyFailurePath() string {
 // MarkUpdateApplyFailed persists the installer-failure marker. It is written
 // by the update helper after the NSIS installer exits non-zero.
 func MarkUpdateApplyFailed(toVersion, reason string) error {
-	if tx, err := ReadPendingUpdate(); err == nil &&
-		strings.TrimSpace(tx.ToVersion) == strings.TrimSpace(toVersion) {
-		return MarkUpdateApplyFailedExact(tx, reason)
+	tx, err := ReadPendingUpdate()
+	if err == nil {
+		if strings.TrimSpace(tx.ToVersion) != strings.TrimSpace(toVersion) {
+			return fmt.Errorf("update apply failure: pending transaction does not match")
+		}
+		return markUpdateApplyFailedInvocation(tx, reason)
+	}
+	if !os.IsNotExist(err) {
+		return fmt.Errorf("update apply failure: read pending transaction: %w", err)
 	}
 	// Keep accepting a diagnostic marker when no matching transaction exists.
 	// Recovery treats markers without a complete transaction ID as stale and
 	// never lets them authorize rollback.
+	unlock, lockErr := acquirePendingUpdateLock()
+	if lockErr != nil {
+		return fmt.Errorf("update apply failure: lock pending transaction: %w", lockErr)
+	}
+	defer unlock()
+	if _, currentErr := ReadPendingUpdate(); currentErr == nil {
+		return fmt.Errorf("update apply failure: pending transaction appeared while waiting")
+	} else if !os.IsNotExist(currentErr) {
+		return fmt.Errorf("update apply failure: read pending transaction: %w", currentErr)
+	}
 	return markUpdateApplyFailed(toVersion, "", "", reason)
 }
 
@@ -63,11 +79,40 @@ func MarkUpdateApplyFailedMatching(toVersion, updateCreatedAt, reason string) er
 		strings.TrimSpace(tx.CreatedAt) != updateCreatedAt {
 		return fmt.Errorf("update apply failure: pending transaction does not match")
 	}
-	return MarkUpdateApplyFailedExact(tx, reason)
+	return markUpdateApplyFailedInvocation(tx, reason)
+}
+
+func markUpdateApplyFailedInvocation(invocation *UpdateTransaction, reason string) error {
+	if invocation == nil {
+		return fmt.Errorf("update apply failure: transaction identity is incomplete")
+	}
+	invocationID := UpdateTransactionID(invocation)
+	if invocationID == "" {
+		return fmt.Errorf("update apply failure: transaction identity is incomplete")
+	}
+	unlock, err := acquirePendingUpdateLock()
+	if err != nil {
+		return fmt.Errorf("update apply failure: lock pending transaction: %w", err)
+	}
+	defer unlock()
+	current, err := ReadPendingUpdate()
+	if err != nil {
+		return fmt.Errorf("update apply failure: read pending transaction: %w", err)
+	}
+	if UpdateTransactionID(current) != invocationID {
+		return fmt.Errorf("update apply failure: pending transaction changed while waiting")
+	}
+	return markUpdateApplyFailed(
+		current.ToVersion,
+		current.CreatedAt,
+		invocationID,
+		reason,
+	)
 }
 
 // MarkUpdateApplyFailedExact records a failure for the complete transaction
-// held by an updater claim.
+// held by an updater claim. The caller must keep that claim's pending lock
+// until this write returns; taking it again here would deadlock the updater.
 func MarkUpdateApplyFailedExact(tx *UpdateTransaction, reason string) error {
 	if tx == nil || strings.TrimSpace(tx.CreatedAt) == "" {
 		return fmt.Errorf("update apply failure: transaction identity is incomplete")
