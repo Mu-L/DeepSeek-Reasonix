@@ -41,20 +41,37 @@ func InspectAndRepairConfig(opts ConfigOptions) (ConfigReport, error) {
 	if !opts.Apply {
 		return inspectAndRepairConfigUnlocked(opts)
 	}
+	paths, err := configRepairTargetPaths(opts)
+	if err != nil {
+		return ConfigReport{}, err
+	}
+	// Direct callers do not carry an external preview ID. Bind their invocation
+	// before waiting on either lock so a newer config or snapshot cannot become
+	// the implicit object of an older call.
+	if opts.expectedStates == nil {
+		opts.expectedStates = make(map[string]string, len(paths))
+		for _, path := range paths {
+			opts.expectedStates[path] = repairPlanFileState(path)
+		}
+		if snapshot := lastKnownGoodConfigPath(); snapshot != "" {
+			bound := repairPlanFileSnapshotAt(snapshot)
+			opts.confirmedGlobalRestore = append([]byte(nil), bound.Content...)
+			opts.hasConfirmedRestore = bound.Readable
+		}
+	}
 	unlockTransaction, err := lockRepairTransaction()
 	if err != nil {
 		return ConfigReport{}, err
 	}
 	defer unlockTransaction()
-	paths, err := configRepairTargetPaths(opts)
-	if err != nil {
-		return ConfigReport{}, err
-	}
 	unlock, err := lockRepairMutations(paths...)
 	if err != nil {
 		return ConfigReport{}, err
 	}
 	defer unlock()
+	if err := verifyRepairPlanFileStates(opts.expectedStates); err != nil {
+		return ConfigReport{}, err
+	}
 	return inspectAndRepairConfigUnlocked(opts)
 }
 
@@ -100,14 +117,14 @@ func inspectAndRepairConfigUnlocked(opts ConfigOptions) (ConfigReport, error) {
 			}
 		}
 		quarantine := item.path + ".reasonix-quarantine-" + opts.Now().UTC().Format("20060102T150405Z")
-		if err := os.Rename(item.path, quarantine); err != nil {
+		if err := renameRepairNodeNoReplace(item.path, quarantine); err != nil {
 			return report, fmt.Errorf("quarantine %s config: %w", item.scope, err)
 		}
 		repairMutationAfterRename(item.path)
 		if _, err := os.Lstat(item.path); err == nil {
 			// The confirmed node already moved; record it so UndoLastRepair can
 			// restore it and retain the concurrent rewrite as a redo copy.
-			tx.Changes = append(tx.Changes, RepairChange{TargetPath: item.path, PreviousPath: quarantine, Scope: item.scope})
+			tx.Changes = append(tx.Changes, repairChangeForPrevious(item.scope, item.path, quarantine))
 			if persistErr := persistRepairTransaction(tx); persistErr != nil {
 				return report, fmt.Errorf("repair plan preview changed since confirmation; target was recreated during quarantine; confirmed state remains at %s; record undo: %v", quarantine, persistErr)
 			}
@@ -125,9 +142,11 @@ func inspectAndRepairConfigUnlocked(opts ConfigOptions) (ConfigReport, error) {
 			}
 		}
 		report.Applied = append(report.Applied, "quarantined "+item.scope+" config at "+quarantine)
-		tx.Changes = append(tx.Changes, RepairChange{TargetPath: item.path, PreviousPath: quarantine, Scope: item.scope})
+		tx.Changes = append(tx.Changes, repairChangeForPrevious(item.scope, item.path, quarantine))
 		if err := persistRepairTransaction(tx); err != nil {
-			_ = os.Rename(quarantine, item.path)
+			if restoreErr := restoreRepairNodeIfAbsent(quarantine, item.path); restoreErr != nil {
+				return report, fmt.Errorf("%w; confirmed config retained at %s: %v", err, quarantine, restoreErr)
+			}
 			return report, err
 		}
 		if item.scope == "global" {
@@ -162,17 +181,24 @@ func configRepairTargetPaths(opts ConfigOptions) ([]string, error) {
 	if opts.OnlyScope != "" && opts.OnlyScope != "global" && opts.OnlyScope != "project" {
 		return nil, fmt.Errorf("unknown config repair scope %q", opts.OnlyScope)
 	}
+	globalPaths := func() []string {
+		paths := []string{config.UserConfigPath()}
+		if snapshot := lastKnownGoodConfigPath(); snapshot != "" {
+			paths = append(paths, snapshot)
+		}
+		return paths
+	}
 	project := filepath.Join(opts.Root, "reasonix.toml")
 	if opts.Root == "" || opts.Root == "." {
 		project = "reasonix.toml"
 	}
 	switch opts.OnlyScope {
 	case "global":
-		return []string{config.UserConfigPath()}, nil
+		return globalPaths(), nil
 	case "project":
 		return []string{project}, nil
 	default:
-		paths := []string{config.UserConfigPath()}
+		paths := globalPaths()
 		if opts.IncludeProject {
 			paths = append(paths, project)
 		}
@@ -185,7 +211,7 @@ func inspectConfig(scope, path string) ConfigCheck {
 	if path == "" {
 		return check
 	}
-	if _, err := os.Stat(path); err != nil {
+	if _, err := os.Lstat(path); err != nil {
 		if !os.IsNotExist(err) {
 			check.Valid = false
 			check.Error = err.Error()
@@ -193,7 +219,11 @@ func inspectConfig(scope, path string) ConfigCheck {
 		return check
 	}
 	check.Exists = true
-	if err := config.ValidateFile(path); err != nil {
+	b, err := os.ReadFile(path)
+	if err == nil {
+		err = config.ValidateBytes(b)
+	}
+	if err != nil {
 		check.Valid = false
 		check.Error = err.Error()
 	}
@@ -212,6 +242,16 @@ func RecordHealthyConfig(version string) error {
 	if path == "" {
 		return nil
 	}
+	snapshot := lastKnownGoodConfigPath()
+	if snapshot == "" {
+		return nil
+	}
+	unlock, err := lockRepairMutations(path, snapshot, snapshot+".json", snapshotDir())
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -219,14 +259,7 @@ func RecordHealthyConfig(version string) error {
 		}
 		return err
 	}
-	if err := config.ValidateFile(path); err != nil {
-		return err
-	}
-	snapshot := lastKnownGoodConfigPath()
-	if snapshot == "" {
-		return nil
-	}
-	if err := fileutil.AtomicWriteFile(snapshot, b, 0o600); err != nil {
+	if err := config.ValidateBytes(b); err != nil {
 		return err
 	}
 	now := time.Now().UTC()
@@ -235,10 +268,22 @@ func RecordHealthyConfig(version string) error {
 	if err != nil {
 		return err
 	}
+	// Publish the immutable, versioned recovery point first. If a later fixed
+	// last-known-good write fails, readers retain the previous fixed snapshot
+	// while the newly recorded version remains independently recoverable.
+	if err := recordConfigSnapshot(path, b, version, now); err != nil {
+		return err
+	}
+	if err := fileutil.AtomicWriteFile(snapshot, b, 0o600); err != nil {
+		return err
+	}
+	// The metadata is informational; restore consumes and validates only the
+	// content file. Both writers are serialized by the same mutation locks, so
+	// a failed metadata replacement cannot expose unverified recovery bytes.
 	if err := fileutil.AtomicWriteFile(snapshot+".json", append(encoded, '\n'), 0o600); err != nil {
 		return err
 	}
-	return recordConfigSnapshot(path, b, version, now)
+	return nil
 }
 
 func lastKnownGoodConfigPath() string {
@@ -251,12 +296,12 @@ func lastKnownGoodConfigPath() string {
 
 func restoreLastKnownGoodConfig(dest string) error {
 	snapshot := lastKnownGoodConfigPath()
-	if err := config.ValidateFile(snapshot); err != nil {
-		return err
-	}
 	b, err := os.ReadFile(snapshot)
 	if err != nil {
 		return err
 	}
-	return fileutil.AtomicWriteFile(dest, b, 0o600)
+	if err := config.ValidateBytes(b); err != nil {
+		return err
+	}
+	return fileutil.AtomicCreateFile(dest, b, 0o600)
 }

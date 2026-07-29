@@ -18,7 +18,7 @@ func TestInstallerCommandShowsUpdateProgressAndPassesUnquotedDFlagLast(t *testin
 		t.Fatal("expected a raw command line forcing the install dir")
 	}
 	got := cmd.SysProcAttr.CmdLine
-	want := `"C:\Temp\reasonix-update-1.exe" /REASONIXUPDATE=1 /D=D:\Tools\Reasonix App`
+	want := `"C:\Temp\reasonix-update-1.exe" /REASONIXUPDATE=1 /REASONIXSTAGE=1 /D=D:\Tools\Reasonix App`
 	if got != want {
 		t.Fatalf("CmdLine = %q, want %q", got, want)
 	}
@@ -33,7 +33,7 @@ func TestInstallerCommandWithoutDirSkipsDFlag(t *testing.T) {
 		t.Fatal("expected a raw command line for visible updater installs")
 	}
 	got := cmd.SysProcAttr.CmdLine
-	want := `"C:\Temp\reasonix-update-1.exe" /REASONIXUPDATE=1`
+	want := `"C:\Temp\reasonix-update-1.exe" /REASONIXUPDATE=1 /REASONIXSTAGE=1`
 	if got != want {
 		t.Fatalf("CmdLine = %q, want %q", got, want)
 	}

@@ -53,6 +53,14 @@ type repairPlanFileSnapshot struct {
 	Readable bool
 }
 
+type repairPlanFileStateDescriptor struct {
+	Target     string `json:"target"`
+	Kind       string `json:"kind"`
+	Mode       uint32 `json:"mode,omitempty"`
+	LinkTarget string `json:"linkTarget,omitempty"`
+	Content    string `json:"content,omitempty"`
+}
+
 // RepairPlanID identifies the canonical plan content without trusting an ID
 // supplied by a caller. It changes when the summary, action list, or any
 // action field changes.
@@ -106,13 +114,7 @@ func repairPlanFileSnapshotFor(readPath, identityPath string) repairPlanFileSnap
 	// Target binds the real destination into StateID without exposing the path
 	// in the exported preview: confirmation for project A cannot be replayed
 	// against project B even when both files have identical content.
-	state := struct {
-		Target     string `json:"target"`
-		Kind       string `json:"kind"`
-		Mode       uint32 `json:"mode,omitempty"`
-		LinkTarget string `json:"linkTarget,omitempty"`
-		Content    string `json:"content,omitempty"`
-	}{Target: repairPlanTargetIdentity(identityPath), Kind: "missing"}
+	state := repairPlanFileStateDescriptor{Target: repairPlanTargetIdentity(identityPath), Kind: "missing"}
 	info, err := os.Lstat(readPath)
 	if err != nil {
 		if !os.IsNotExist(err) {
@@ -134,13 +136,42 @@ func repairPlanFileSnapshotFor(readPath, identityPath string) repairPlanFileSnap
 	if b, readErr := os.ReadFile(readPath); readErr == nil {
 		snapshot.Content = b
 		snapshot.Readable = true
-		sum := sha256.Sum256(snapshot.Content)
+	}
+	snapshot.StateID = repairPlanReadStateIDFor(
+		identityPath,
+		info.Mode(),
+		state.Kind,
+		state.LinkTarget,
+		snapshot.Content,
+		snapshot.Readable,
+	)
+	return snapshot
+}
+
+// repairPlanReadStateIDFor binds the exact bytes or link target consumed by a
+// repair operation. Checking the path before and after a read is insufficient:
+// an uncooperative writer can temporarily replace its contents during the read
+// and restore the expected node before the second path-based check.
+func repairPlanReadStateIDFor(
+	identityPath string,
+	mode os.FileMode,
+	kind, linkTarget string,
+	content []byte,
+	readable bool,
+) string {
+	state := repairPlanFileStateDescriptor{
+		Target:     repairPlanTargetIdentity(identityPath),
+		Kind:       kind,
+		Mode:       uint32(mode),
+		LinkTarget: linkTarget,
+	}
+	if readable {
+		sum := sha256.Sum256(content)
 		state.Content = hex.EncodeToString(sum[:])
 	} else if state.Kind == "file" || state.Kind == "symlink" {
 		state.Kind += "-unreadable"
 	}
-	snapshot.StateID = repairPlanStateID(state)
-	return snapshot
+	return repairPlanStateID(state)
 }
 
 func repairPlanFileState(path string) string {
@@ -187,7 +218,8 @@ type ApplyPlanOptions struct {
 	AllowProject bool
 	// ExpectedPreviewID binds application to the preview that was confirmed.
 	// Empty preserves direct package callers that do not model an approval
-	// boundary; CLI confirmation paths always populate it.
+	// boundary; they are still bound to the preview captured at the start of
+	// this ApplyRepairPlan invocation. CLI confirmation paths always populate it.
 	ExpectedPreviewID string
 }
 
@@ -322,20 +354,29 @@ func PreviewRepairPlan(plan RepairPlan, opts ApplyPlanOptions) ([]RepairPlanPrev
 			if err != nil {
 				return nil, err
 			}
-			if err := verifyConfigSnapshot(snap); err != nil {
+			after := repairPlanFileSnapshotAt(snap.Path)
+			metadata := repairPlanFileSnapshotAt(snap.Path + ".json")
+			collection := repairPlanFileSnapshotAt(snapshotDir())
+			if !after.Readable {
+				return nil, fmt.Errorf("config snapshot %q is unreadable", snap.ID)
+			}
+			if err := verifyConfirmedConfigSnapshot(snap, after.Content); err != nil {
 				return nil, err
 			}
 			before := repairPlanFileSnapshotAt(config.UserConfigPath())
-			after := repairPlanFileSnapshotAt(snap.Path)
 			preview.Description = "Restore verified global configuration snapshot " + snap.ID
 			preview.Diff = textdiff.Build("global-config.toml", string(before.Content), string(after.Content), textdiff.Modify).Diff
 			preview.StateID = repairPlanStateID(struct {
-				Current  string `json:"current"`
-				Snapshot string `json:"snapshot"`
-			}{before.StateID, after.StateID})
+				Current    string `json:"current"`
+				Snapshot   string `json:"snapshot"`
+				Metadata   string `json:"metadata"`
+				Collection string `json:"collection"`
+			}{before.StateID, after.StateID, metadata.StateID, collection.StateID})
 			preview.fileStates = map[string]string{
 				config.UserConfigPath(): before.StateID,
 				snap.Path:               after.StateID,
+				snap.Path + ".json":     metadata.StateID,
+				snapshotDir():           collection.StateID,
 			}
 			preview.afterContent = append([]byte(nil), after.Content...)
 			preview.afterReadable = after.Readable
@@ -401,7 +442,10 @@ func ApplyRepairPlan(plan RepairPlan, opts ApplyPlanOptions) (ApplyPlanResult, e
 	}
 	for i, action := range plan.Actions {
 		var actionErr error
-		applied, actionErr := applyRepairPlanAction(plan, action, boundPreview[i], opts, expected != "")
+		// Empty ExpectedPreviewID only skips the cross-invocation confirmation
+		// check above. The filesystem state observed by this invocation's preview
+		// is always rechecked under the mutation locks before applying.
+		applied, actionErr := applyRepairPlanAction(plan, action, boundPreview[i], opts, true)
 		result.Applied = append(result.Applied, applied...)
 		// Absorb even on failure: a partially applied action may have recorded
 		// changes that the plan-level undo must cover.
@@ -423,7 +467,7 @@ func applyRepairPlanAction(plan RepairPlan, action RepairPlanAction, bound Repai
 		var rollback UpdateRollbackResult
 		var err error
 		if enforcePreview {
-			rollback, err = rollbackPendingUpdateState(bound.StateID)
+			rollback, err = rollbackPendingUpdateState(bound.StateID, bound.fileStates)
 		} else {
 			rollback, err = RollbackPendingUpdate()
 		}
@@ -541,6 +585,9 @@ func pendingUpdateBoundPreview(tx *UpdateTransaction) (string, map[string]string
 			bind(f.BackupPath)
 		}
 	}
+	if tx.TargetKind == "file" {
+		bind(installedFileUpdateStatePath(tx))
+	}
 	bind(tx.TargetPath)
 	if strings.EqualFold(strings.TrimSpace(tx.TargetKind), "app-bundle") || strings.TrimSpace(tx.BackupPath) != "" {
 		bind(tx.BackupPath)
@@ -555,14 +602,26 @@ func pendingUpdateBoundPreview(tx *UpdateTransaction) (string, map[string]string
 // directory tree digest. Directory kind/mode alone is not enough for .app
 // bundles: interior executables can change without touching the root node.
 func repairPlanReleaseNodeState(path string) string {
-	info, err := os.Lstat(path)
+	return repairPlanReleaseNodeStateFor(path, path)
+}
+
+func repairPlanReleaseNodeStateFor(readPath, identityPath string) string {
+	info, err := os.Lstat(readPath)
 	if err != nil {
-		return repairPlanFileState(path)
+		return repairPlanFileSnapshotFor(readPath, identityPath).StateID
 	}
 	if info.IsDir() {
-		return repairPlanTreeStateID(path)
+		return repairPlanTreeStateIDFor(readPath, identityPath)
 	}
-	return repairPlanFileState(path)
+	return repairPlanFileSnapshotFor(readPath, identityPath).StateID
+}
+
+func verifyRepairPlanReleaseNodeStateFor(readPath, identityPath, expected string) error {
+	actual := repairPlanReleaseNodeStateFor(readPath, identityPath)
+	if expected != actual {
+		return fmt.Errorf("repair plan preview changed since confirmation; re-preview and re-confirm (expected %s, got %s)", expected, actual)
+	}
+	return nil
 }
 
 type repairPlanTreeEntry struct {
@@ -651,15 +710,15 @@ func repairPlanTreeContentStateID(root string) (string, error) {
 	return repairPlanStateID(entries), nil
 }
 
-func repairPlanTreeStateID(root string) string {
-	entries, err := repairPlanTreeEntries(root)
+func repairPlanTreeStateIDFor(readRoot, identityRoot string) string {
+	entries, err := repairPlanTreeEntries(readRoot)
 	if err != nil {
-		entries = []repairPlanTreeEntry{{Rel: root, Kind: "unreadable"}}
+		entries = []repairPlanTreeEntry{{Rel: readRoot, Kind: "unreadable"}}
 	}
 	return repairPlanStateID(struct {
 		Target  string                `json:"target"`
 		Entries []repairPlanTreeEntry `json:"entries"`
-	}{repairPlanTargetIdentity(root), entries})
+	}{repairPlanTargetIdentity(identityRoot), entries})
 }
 
 func pendingUpdateFiles(tx *UpdateTransaction) []UpdateTransactionFile {
@@ -709,7 +768,11 @@ func repairPlanActionMutationPaths(action RepairPlanAction, opts ApplyPlanOption
 	case "repair_config":
 		return configRepairTargetPaths(ConfigOptions{Root: opts.Root, IncludeProject: action.Scope == "project", OnlyScope: action.Scope})
 	case "restore_snapshot":
-		return []string{config.UserConfigPath()}, nil
+		dir, contentPath, metadataPath, err := configSnapshotPaths(action.SnapshotID)
+		if err != nil {
+			return nil, err
+		}
+		return []string{config.UserConfigPath(), dir, contentPath, metadataPath}, nil
 	case "rebuild_derived_state":
 		return derivedStateTargetPaths(action.Target)
 	default:
@@ -726,6 +789,23 @@ func verifyRepairPlanFileState(path string, expectedStates map[string]string) er
 		return fmt.Errorf("repair plan preview did not bind target state; re-preview and re-confirm")
 	}
 	return verifyRepairPlanStateID(path, expected)
+}
+
+func verifyRepairPlanFileStates(expectedStates map[string]string) error {
+	if len(expectedStates) == 0 {
+		return nil
+	}
+	paths := make([]string, 0, len(expectedStates))
+	for path := range expectedStates {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	for _, path := range paths {
+		if err := verifyRepairPlanFileState(path, expectedStates); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func verifyRepairPlanStateID(path, expected string) error {

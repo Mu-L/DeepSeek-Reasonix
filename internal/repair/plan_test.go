@@ -290,12 +290,12 @@ func TestRollbackPendingUpdateStateBindsCompleteTransaction(t *testing.T) {
 	if err := os.WriteFile(target, []byte("new"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	expectedState, _ := pendingUpdateBoundPreview(tx)
+	expectedState, expectedFiles := pendingUpdateBoundPreview(tx)
 	tx.FromVersion = "different-old-version"
 	if err := WritePendingUpdate(tx); err != nil {
 		t.Fatal(err)
 	}
-	result, err := rollbackPendingUpdateState(expectedState)
+	result, err := rollbackPendingUpdateState(expectedState, expectedFiles)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -382,6 +382,7 @@ func TestApplyRepairPlanPreservesUncooperativeWriteAfterRename(t *testing.T) {
 		t.Fatalf("confirmed state backup = %q, %v", got, err)
 	}
 	// The moved node must still be undoable: concurrent rewrite is retained as redo.
+	repairMutationAfterRename = originalHook
 	if _, err := UndoLastRepair(); err != nil {
 		t.Fatalf("undo after concurrent recreate: %v", err)
 	}
@@ -453,6 +454,50 @@ func TestRepairMutationLockRechecksAfterWaiting(t *testing.T) {
 	}
 	if data, err := os.ReadFile(tabs); err != nil || string(data) != "changed-while-waiting" {
 		t.Fatalf("post-preview state was touched: %q, %v", data, err)
+	}
+}
+
+func TestApplyRepairPlanDirectCallerRejectsDriftAfterInvocationPreview(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("REASONIX_HOME", home)
+	tabs := filepath.Join(home, "desktop-tabs.json")
+	if err := os.WriteFile(tabs, []byte("initial"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	plan := RepairPlan{
+		SchemaVersion: RepairPlanSchemaVersion,
+		Summary:       "rebuild tabs",
+		Actions: []RepairPlanAction{{
+			Type:   "rebuild_derived_state",
+			Target: "tabs",
+			Reason: "malformed state",
+		}},
+	}
+	targetKey := repairMutationTestKey(tabs)
+	originalHook := repairMutationBeforeLock
+	var writeErr error
+	changed := false
+	repairMutationBeforeLock = func(paths []string) {
+		if changed || len(paths) != 1 || paths[0] != targetKey {
+			return
+		}
+		changed = true
+		writeErr = os.WriteFile(tabs, []byte("changed-after-preview"), 0o600)
+	}
+	t.Cleanup(func() { repairMutationBeforeLock = originalHook })
+
+	result, err := ApplyRepairPlan(plan, ApplyPlanOptions{})
+	if err == nil || !strings.Contains(err.Error(), "preview changed since confirmation") {
+		t.Fatalf("direct apply after invocation drift = %+v, %v", result, err)
+	}
+	if writeErr != nil {
+		t.Fatalf("inject drift: %v", writeErr)
+	}
+	if len(result.Applied) != 0 {
+		t.Fatalf("direct apply wrote actions after drift: %v", result.Applied)
+	}
+	if got, err := os.ReadFile(tabs); err != nil || string(got) != "changed-after-preview" {
+		t.Fatalf("drifted state = %q, %v", got, err)
 	}
 }
 
@@ -603,6 +648,48 @@ func TestApplyRepairPlanRestoresCurrentConfirmedSnapshot(t *testing.T) {
 	}
 	if got, err := os.ReadFile(global); err != nil || string(got) != string(current) {
 		t.Fatalf("undo restored = %q, %v", got, err)
+	}
+}
+
+func TestApplyRepairPlanRejectsSnapshotMetadataDrift(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("REASONIX_HOME", home)
+	global := filepath.Join(home, "config.toml")
+	if err := os.WriteFile(global, []byte("default_model = \"known-good\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := RecordHealthyConfig("v1"); err != nil {
+		t.Fatal(err)
+	}
+	snapshots, err := ListConfigSnapshots()
+	if err != nil || len(snapshots) != 1 {
+		t.Fatalf("snapshots = %+v, err = %v", snapshots, err)
+	}
+	current := []byte("default_model = \"current\"\n")
+	if err := os.WriteFile(global, current, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	plan := RepairPlan{SchemaVersion: 1, Summary: "snapshot", Actions: []RepairPlanAction{{Type: "restore_snapshot", SnapshotID: snapshots[0].ID, Reason: "known good"}}}
+	preview, err := PreviewRepairPlan(plan, ApplyPlanOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadataPath := snapshots[0].Path + ".json"
+	metadata := snapshots[0]
+	metadata.Version = "drifted"
+	encoded, err := json.MarshalIndent(metadata, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(metadataPath, append(encoded, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := ApplyRepairPlan(plan, ApplyPlanOptions{ExpectedPreviewID: RepairPlanPreviewID(plan, preview)}); err == nil {
+		t.Fatal("apply accepted snapshot metadata drift after confirmation")
+	}
+	if got, err := os.ReadFile(global); err != nil || string(got) != string(current) {
+		t.Fatalf("config changed after rejected metadata drift: %q, %v", got, err)
 	}
 }
 

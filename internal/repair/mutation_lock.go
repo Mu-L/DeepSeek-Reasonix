@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -41,27 +42,73 @@ func lockRepairTransaction() (func(), error) {
 }
 
 func restoreRepairNodeIfAbsent(backup, target string) error {
-	info, err := os.Lstat(backup)
+	// Every backup passed here was produced by renaming the target to a sibling
+	// or to a same-filesystem repair directory. A no-replace rename restores the
+	// exact node and consumes the backup in one operation. Recreating a link/file
+	// and then removing backup would let another writer replace backup between
+	// those syscalls and have its node deleted.
+	if err := renameRepairNodeNoReplace(backup, target); err != nil {
+		return fmt.Errorf("restore repair target: %w", err)
+	}
+	return nil
+}
+
+// removeRepairNodeIfMatching first displaces a transaction-owned backup to a
+// unique sibling, then verifies the moved node against its original target
+// identity. A path replacement between verification and cleanup is restored or
+// retained, never unlinked as if it were transaction-owned.
+func removeRepairNodeIfMatching(path, identityPath, expectedStateID string) error {
+	expectedStateID = strings.TrimSpace(expectedStateID)
+	if expectedStateID == "" {
+		// Legacy transactions did not persist backup identity. Leaving a stale
+		// backup is safer than deleting a path whose ownership cannot be proven.
+		return nil
+	}
+	cleanup, err := moveRepairNodeToUniqueCleanup(path)
 	if err != nil {
 		return err
 	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		linkTarget, err := os.Readlink(backup)
-		if err != nil {
-			return err
-		}
-		if err := os.Symlink(linkTarget, target); err != nil {
-			return err
-		}
-		return os.Remove(backup)
+	if cleanup == "" {
+		return nil
 	}
-	if !info.Mode().IsRegular() {
-		return fmt.Errorf("restore repair target: unsupported backup type %s", info.Mode().Type())
-	}
-	if err := os.Link(backup, target); err != nil {
+	if err := verifyRepairPlanReleaseNodeStateFor(cleanup, identityPath, expectedStateID); err != nil {
+		if restoreErr := renameRepairNodeNoReplace(cleanup, path); restoreErr != nil {
+			return errors.Join(err, fmt.Errorf("preserve changed repair backup at %s: %w", cleanup, restoreErr))
+		}
 		return err
 	}
-	return os.Remove(backup)
+	info, err := os.Lstat(cleanup)
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		if restoreErr := renameRepairNodeNoReplace(cleanup, path); restoreErr != nil {
+			return errors.Join(
+				fmt.Errorf("remove repair backup: directories are unsupported"),
+				fmt.Errorf("preserve repair backup at %s: %w", cleanup, restoreErr),
+			)
+		}
+		return fmt.Errorf("remove repair backup: directories are unsupported")
+	}
+	return os.Remove(cleanup)
+}
+
+func moveRepairNodeToUniqueCleanup(path string) (string, error) {
+	for attempt := 0; attempt < 16; attempt++ {
+		cleanup := fmt.Sprintf("%s.reasonix-cleanup-%d-%d", path, time.Now().UTC().UnixNano(), attempt)
+		err := renameRepairNodeNoReplace(path, cleanup)
+		if err == nil {
+			return cleanup, nil
+		}
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		if os.IsExist(err) {
+			continue
+		}
+		return "", err
+	}
+	return "", fmt.Errorf("remove repair node: cannot allocate cleanup path")
 }
 
 // canonicalRepairPath resolves a repair target to a stable key shared by

@@ -8,7 +8,7 @@ import (
 
 func TestInstallerCommandLineUsesVisibleUpdateModeAndKeepsDFlagLast(t *testing.T) {
 	got := installerCommandLine(`C:\Temp\Reasonix Installer.exe`, `D:\Tools\Reasonix App`)
-	want := `"C:\Temp\Reasonix Installer.exe" /REASONIXUPDATE=1 /D=D:\Tools\Reasonix App`
+	want := `"C:\Temp\Reasonix Installer.exe" /REASONIXUPDATE=1 /REASONIXSTAGE=1 /D=D:\Tools\Reasonix App`
 	if got != want {
 		t.Fatalf("installerCommandLine = %q, want %q", got, want)
 	}
@@ -24,16 +24,20 @@ func TestWindowsUpdateHandoffArgsCarryParentInstallAndRelaunch(t *testing.T) {
 	got := windowsUpdateHandoffArgs(
 		4242,
 		`C:\Users\Jane Doe\AppData\Local\Reasonix\updates\Reasonix-windows-amd64-installer.exe`,
+		strings.Repeat("a", 64),
 		`D:\Tools\Reasonix App`,
 		`D:\Tools\Reasonix App\reasonix-desktop.exe`,
 		"v1.6.0",
 		"2026-07-29T00:00:00Z",
+		"transaction-1",
 	)
 	want := []string{
 		"--parent-pid", "4242",
 		"--installer", `C:\Users\Jane Doe\AppData\Local\Reasonix\updates\Reasonix-windows-amd64-installer.exe`,
+		"--installer-sha256", strings.Repeat("a", 64),
 		"--to-version", "v1.6.0",
 		"--created-at", "2026-07-29T00:00:00Z",
+		"--transaction-id", "transaction-1",
 		"--install-dir", `D:\Tools\Reasonix App`,
 		"--relaunch", `D:\Tools\Reasonix App\reasonix-desktop.exe`,
 	}
@@ -55,7 +59,9 @@ func TestWindowsInstallerScriptWaitsBeforeCopyingExecutable(t *testing.T) {
 		`!define REASONIX_CLI "reasonix-cli.exe"`,
 		`!define REASONIX_PORTABLE_ENTRY "Reasonix.exe"`,
 		"Var ReasonixUpdateMode",
+		"Var ReasonixStageMode",
 		`${GetOptions} $R0 "/REASONIXUPDATE=" $R1`,
+		`${GetOptions} $R0 "/REASONIXSTAGE=" $R2`,
 		"Function reasonix.skipSetupPageForUpdate",
 		"Function reasonix.showUpdateProgress",
 		`!define MUI_PAGE_CUSTOMFUNCTION_PRE reasonix.skipFinishPageForUpdate`,
@@ -96,6 +102,13 @@ func TestWindowsInstallerScriptWaitsBeforeCopyingExecutable(t *testing.T) {
 	copyFiles := strings.Index(script, "!insertmacro wails.files")
 	if wait < 0 || copyFiles < 0 || wait > copyFiles {
 		t.Fatalf("installer must wait for the running exe to unlock before wails.files (wait=%d copy=%d)", wait, copyFiles)
+	}
+	stageBranch := strings.Index(script, "StrCmp $ReasonixStageMode \"1\" reasonix_copy_payload")
+	if stageBranch < 0 || stageBranch > copyFiles {
+		t.Fatalf("staging mode must bypass live executable unlock before payload extraction (branch=%d copy=%d)", stageBranch, copyFiles)
+	}
+	if !strings.Contains(script, "StrCmp $ReasonixStageMode \"1\" reasonix_section_done") {
+		t.Fatal("staging mode must skip registry, shortcuts, associations, and uninstaller")
 	}
 }
 

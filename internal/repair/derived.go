@@ -12,25 +12,25 @@ import (
 )
 
 func RebuildDerivedState(target string) ([]string, error) {
+	paths, err := derivedStateTargetPaths(target)
+	if err != nil {
+		return nil, err
+	}
+	_, expectedStates := repairPlanDerivedStateSnapshot(strings.ToLower(strings.TrimSpace(target)))
 	unlockTransaction, err := lockRepairTransaction()
 	if err != nil {
 		return nil, err
 	}
 	defer unlockTransaction()
-	paths, err := derivedStateTargetPaths(target)
-	if err != nil {
-		return nil, err
-	}
 	unlock, err := lockRepairMutations(paths...)
 	if err != nil {
 		return nil, err
 	}
 	defer unlock()
-	return rebuildDerivedStateUnlocked(target)
-}
-
-func rebuildDerivedStateUnlocked(target string) ([]string, error) {
-	return rebuildDerivedStateBoundUnlocked(target, nil)
+	if err := verifyRepairPlanFileStates(expectedStates); err != nil {
+		return nil, err
+	}
+	return rebuildDerivedStateBoundUnlocked(target, expectedStates)
 }
 
 func rebuildDerivedStateBoundUnlocked(target string, expectedStates map[string]string) ([]string, error) {
@@ -55,7 +55,7 @@ func rebuildDerivedStateBoundUnlocked(target string, expectedStates map[string]s
 		if path == "" {
 			continue
 		}
-		if _, err := os.Stat(path); err != nil {
+		if _, err := os.Lstat(path); err != nil {
 			if os.IsNotExist(err) {
 				continue
 			}
@@ -69,14 +69,14 @@ func rebuildDerivedStateBoundUnlocked(target string, expectedStates map[string]s
 			return applied, err
 		}
 		quarantine := path + ".reasonix-rebuild-" + stamp
-		if err := os.Rename(path, quarantine); err != nil {
+		if err := renameRepairNodeNoReplace(path, quarantine); err != nil {
 			return applied, err
 		}
 		repairMutationAfterRename(path)
 		if _, err := os.Lstat(path); err == nil {
 			// Confirmed state was already isolated. Persist the move so undo
 			// restores it and keeps the concurrent rewrite as a redo copy.
-			tx.Changes = append(tx.Changes, RepairChange{Scope: "derived:" + name, TargetPath: path, PreviousPath: quarantine})
+			tx.Changes = append(tx.Changes, repairChangeForPrevious("derived:"+name, path, quarantine))
 			if persistErr := persistRepairTransaction(tx); persistErr != nil {
 				return applied, fmt.Errorf("repair plan preview changed since confirmation; target was recreated during quarantine; confirmed state remains at %s; record undo: %v", quarantine, persistErr)
 			}
@@ -94,9 +94,11 @@ func rebuildDerivedStateBoundUnlocked(target string, expectedStates map[string]s
 			}
 		}
 		applied = append(applied, quarantine)
-		tx.Changes = append(tx.Changes, RepairChange{Scope: "derived:" + name, TargetPath: path, PreviousPath: quarantine})
+		tx.Changes = append(tx.Changes, repairChangeForPrevious("derived:"+name, path, quarantine))
 		if err := persistRepairTransaction(tx); err != nil {
-			_ = os.Rename(quarantine, path)
+			if restoreErr := restoreRepairNodeIfAbsent(quarantine, path); restoreErr != nil {
+				return applied, fmt.Errorf("%w; confirmed derived state retained at %s: %v", err, quarantine, restoreErr)
+			}
 			return applied, err
 		}
 	}

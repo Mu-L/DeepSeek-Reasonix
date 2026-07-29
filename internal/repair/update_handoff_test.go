@@ -88,6 +88,115 @@ func TestClaimPendingAppBundleUpdateHandoffReturnsRecordedPaths(t *testing.T) {
 	}
 }
 
+func TestClaimPendingAppBundleUpdateHandoffExactRejectsRewrittenTransaction(t *testing.T) {
+	tx, _ := prepareTestAppBundleHandoff(t)
+	changed := *tx
+	changed.FromVersion = "rewritten"
+	if err := WritePendingUpdate(&changed); err != nil {
+		t.Fatal(err)
+	}
+
+	_, release, err := ClaimPendingAppBundleUpdateHandoffExact(
+		tx.ToVersion,
+		tx.CreatedAt,
+		UpdateTransactionID(tx),
+		time.Second,
+	)
+	if release != nil {
+		release()
+	}
+	if err == nil || !strings.Contains(err.Error(), "pending transaction changed") {
+		t.Fatalf("claim error = %v, want full transaction rejection", err)
+	}
+	current, readErr := ReadPendingUpdate()
+	if readErr != nil || current.FromVersion != changed.FromVersion {
+		t.Fatalf("rewritten transaction = %+v, %v", current, readErr)
+	}
+}
+
+func TestPrepareAppBundleUpdateHandoffRejectsExistingBackup(t *testing.T) {
+	t.Setenv("REASONIX_HOME", t.TempDir())
+	installRoot, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := filepath.Join(installRoot, "Reasonix.app")
+	exe := filepath.Join(app, "Contents", "MacOS", "Reasonix")
+	backup := app + ".reasonix-update-backup"
+	staging, err := os.MkdirTemp("", "reasonix-mac-update-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(staging) })
+	stagedApp := filepath.Join(staging, "Reasonix.app")
+	for _, dir := range []string{filepath.Dir(exe), backup, stagedApp} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(exe, []byte("current"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	originalExecutable := repairExecutable
+	repairExecutable = func() (string, error) { return exe, nil }
+	t.Cleanup(func() { repairExecutable = originalExecutable })
+
+	if _, err := PrepareAppBundleUpdateHandoff(
+		"v1", "v2", app, backup, stagedApp, staging, os.Getpid(),
+	); err == nil || !strings.Contains(err.Error(), "backup path already exists") {
+		t.Fatalf("prepare error = %v, want existing-backup rejection", err)
+	}
+	if _, err := os.Stat(PendingUpdatePath()); !os.IsNotExist(err) {
+		t.Fatalf("rejected prepare wrote pending transaction: %v", err)
+	}
+}
+
+func TestClaimPendingAppBundleUpdateHandoffRejectsBackupAppearingAfterPrepare(t *testing.T) {
+	tx, _ := prepareTestAppBundleHandoff(t)
+	if err := os.MkdirAll(tx.BackupPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, release, err := ClaimPendingAppBundleUpdateHandoff(tx.ToVersion, tx.CreatedAt, time.Second)
+	if release != nil {
+		release()
+	}
+	if err == nil || !strings.Contains(err.Error(), "backup path already exists") {
+		t.Fatalf("claim error = %v, want appearing-backup rejection", err)
+	}
+	if _, err := ReadPendingUpdate(); err != nil {
+		t.Fatalf("rejected claim removed pending transaction: %v", err)
+	}
+	if _, err := CancelPendingAppBundleUpdateHandoff(tx.ToVersion, tx.CreatedAt, time.Second); err == nil ||
+		!strings.Contains(err.Error(), "backup path already exists") {
+		t.Fatalf("cancel error = %v, want appearing-backup rejection", err)
+	}
+	if _, err := os.Stat(tx.BackupPath); err != nil {
+		t.Fatalf("rejected cancel removed appearing backup: %v", err)
+	}
+	if _, err := ReadPendingUpdate(); err != nil {
+		t.Fatalf("rejected cancel removed pending transaction: %v", err)
+	}
+}
+
+func TestClearClaimedAppBundleUpdateHandoffRejectsOriginalDrift(t *testing.T) {
+	tx, _ := prepareTestAppBundleHandoff(t)
+	claimed, release, err := ClaimPendingAppBundleUpdateHandoff(tx.ToVersion, tx.CreatedAt, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	if err := os.WriteFile(filepath.Join(tx.TargetPath, "changed-after-claim"), []byte("tampered"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ClearClaimedAppBundleUpdateHandoff(claimed); err == nil ||
+		!strings.Contains(err.Error(), "installed bundle changed after prepare") {
+		t.Fatalf("clear error = %v, want original drift rejection", err)
+	}
+	if _, err := ReadPendingUpdate(); err != nil {
+		t.Fatalf("unsafe clear removed pending handoff: %v", err)
+	}
+}
+
 func TestClaimPendingAppBundleUpdateHandoffRejectsUnboundTarget(t *testing.T) {
 	tx, staging := prepareTestAppBundleHandoff(t)
 	arbitrary := filepath.Join(t.TempDir(), "Unrelated.app")
@@ -119,6 +228,7 @@ func TestClaimPendingAppBundleUpdateHandoffRejectsLegacyTransaction(t *testing.T
 	tx.HandoffAppPath = ""
 	tx.HandoffStagingPath = ""
 	tx.HandoffAppTreeID = ""
+	tx.HandoffStagingTreeID = ""
 	tx.HandoffOwnerPID = 0
 	if err := WritePendingUpdate(tx); err != nil {
 		t.Fatal(err)
@@ -133,6 +243,29 @@ func TestClaimPendingAppBundleUpdateHandoffRejectsLegacyTransaction(t *testing.T
 	}
 	if _, err := ReadPendingUpdate(); err != nil {
 		t.Fatalf("legacy transaction should remain readable: %v", err)
+	}
+}
+
+func TestClaimPendingAppBundleUpdateHandoffRejectsMissingStagingDigest(t *testing.T) {
+	tx, _ := prepareTestAppBundleHandoff(t)
+	tx.HandoffStagingTreeID = ""
+	if err := WritePendingUpdate(tx); err != nil {
+		t.Fatal(err)
+	}
+
+	_, release, err := ClaimPendingAppBundleUpdateHandoff(
+		tx.ToVersion,
+		tx.CreatedAt,
+		time.Second,
+	)
+	if release != nil {
+		release()
+	}
+	if err == nil || !strings.Contains(err.Error(), "handoff staging digest is missing") {
+		t.Fatalf("claim error = %v, want missing staging digest rejection", err)
+	}
+	if _, err := ReadPendingUpdate(); err != nil {
+		t.Fatalf("rejected transaction should remain readable: %v", err)
 	}
 }
 
@@ -177,6 +310,67 @@ func TestClaimPendingAppBundleUpdateHandoffRejectsStagedTreeDrift(t *testing.T) 
 	}
 	if _, err := os.Stat(staging); err != nil {
 		t.Fatalf("staging was removed after rejected claim: %v", err)
+	}
+}
+
+func TestClaimPendingAppBundleUpdateHandoffRejectsStagingRootDrift(t *testing.T) {
+	tx, staging := prepareTestAppBundleHandoff(t)
+	if err := os.WriteFile(filepath.Join(staging, "unexpected"), []byte("tampered"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, release, err := ClaimPendingAppBundleUpdateHandoffExact(
+		tx.ToVersion,
+		tx.CreatedAt,
+		UpdateTransactionID(tx),
+		time.Second,
+	)
+	if release != nil {
+		release()
+	}
+	if err == nil || !strings.Contains(err.Error(), "staging directory changed") {
+		t.Fatalf("claim error = %v, want staging-root drift rejection", err)
+	}
+	if _, err := os.Stat(staging); err != nil {
+		t.Fatalf("staging was removed after rejected claim: %v", err)
+	}
+}
+
+func TestCleanupAppBundleUpdateHandoffStagingPreservesConcurrentRecreate(t *testing.T) {
+	tx, staging := prepareTestAppBundleHandoff(t)
+	originalHook := updateCleanupAfterRename
+	updateCleanupAfterRename = func(oldpath, _ string) {
+		if oldpath == staging {
+			if err := os.MkdirAll(staging, 0o700); err != nil {
+				t.Errorf("recreate staging: %v", err)
+				return
+			}
+			if err := os.WriteFile(filepath.Join(staging, "concurrent"), []byte("keep"), 0o600); err != nil {
+				t.Errorf("write concurrent staging: %v", err)
+			}
+		}
+	}
+	t.Cleanup(func() { updateCleanupAfterRename = originalHook })
+
+	if err := CleanupAppBundleUpdateHandoffStaging(tx); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(filepath.Join(staging, "concurrent")); err != nil || string(got) != "keep" {
+		t.Fatalf("concurrent staging = %q, %v", got, err)
+	}
+}
+
+func TestCleanupAppBundleUpdateHandoffStagingRejectsDrift(t *testing.T) {
+	tx, staging := prepareTestAppBundleHandoff(t)
+	if err := os.WriteFile(filepath.Join(staging, "unexpected"), []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := CleanupAppBundleUpdateHandoffStaging(tx); err == nil ||
+		!strings.Contains(err.Error(), "staging directory changed") {
+		t.Fatalf("cleanup error = %v, want staging drift rejection", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(staging, "unexpected")); err != nil || string(got) != "keep" {
+		t.Fatalf("drifted staging = %q, %v", got, err)
 	}
 }
 
@@ -231,6 +425,24 @@ func TestCancelPendingAppBundleUpdateHandoffPreservesDriftedOriginal(t *testing.
 	}
 	if _, err := ReadPendingUpdate(); err != nil {
 		t.Fatalf("pending handoff was lost after unsafe cancellation: %v", err)
+	}
+}
+
+func TestCancelPendingAppBundleUpdateHandoffExactRejectsRewrittenTransaction(t *testing.T) {
+	tx, _ := prepareTestAppBundleHandoff(t)
+	changed := *tx
+	changed.HandoffOwnerPID++
+	if err := WritePendingUpdate(&changed); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := CancelPendingAppBundleUpdateHandoffExact(tx, time.Second); err == nil ||
+		!strings.Contains(err.Error(), "transaction changed") {
+		t.Fatalf("exact cancel error = %v, want full transaction rejection", err)
+	}
+	current, err := ReadPendingUpdate()
+	if err != nil || current.HandoffOwnerPID != changed.HandoffOwnerPID {
+		t.Fatalf("rewritten handoff transaction = %+v, %v", current, err)
 	}
 }
 

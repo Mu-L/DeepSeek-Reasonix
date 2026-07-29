@@ -243,6 +243,11 @@ type App struct {
 
 	startupTracker *repair.StartupTracker
 	previousRun    repair.PreviousRunObservation
+	// Healthy-update identity is captured before Wails starts. A process only
+	// commits the complete probationary transaction it booted from, never a
+	// rewritten or later same-version retry.
+	healthyUpdateCreatedAt     string
+	healthyUpdateTransactionID string
 	// startupReady records that the window reached domReady. The shutdown path
 	// treats an exit before this point as an incomplete start: it must neither
 	// reset the crash-loop counter nor bless a probationary update, or a build
@@ -893,7 +898,7 @@ func (a *App) shutdown(context.Context) {
 		// recovery threshold and the update backups stay rollback-ready.
 		_ = a.startupTracker.MarkClean()
 		if !config.SafeModeRequested() {
-			_ = repair.MarkUpdateHealthy(version)
+			_ = repair.MarkUpdateHealthyExact(version, a.healthyUpdateCreatedAt, a.healthyUpdateTransactionID)
 			_ = repair.RecordHealthyConfig(version)
 		}
 	}
@@ -979,7 +984,7 @@ func (a *App) domReady(_ context.Context) {
 				return
 			}
 			if !config.SafeModeRequested() {
-				if err := repair.MarkUpdateHealthy(version); err != nil {
+				if err := repair.MarkUpdateHealthyExact(version, a.healthyUpdateCreatedAt, a.healthyUpdateTransactionID); err != nil {
 					slog.Warn("desktop: commit healthy update", "err", err)
 				}
 				if err := repair.RecordHealthyConfig(version); err != nil {

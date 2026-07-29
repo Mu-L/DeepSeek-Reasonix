@@ -21,7 +21,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/minio/selfupdate"
 	"golang.org/x/mod/semver"
 
 	"reasonix/desktop/internal/update"
@@ -402,6 +401,11 @@ func writeAtomic(path string, data []byte, mode os.FileMode) error {
 	}
 	name := tmp.Name()
 	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		_ = os.Remove(name)
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
 		tmp.Close()
 		_ = os.Remove(name)
 		return err
@@ -823,9 +827,10 @@ func applyLinux(targz []byte, prepared *repair.UpdateTransaction) error {
 	if prepared == nil {
 		return fmt.Errorf("update: prepared transaction is unavailable")
 	}
-	_, releaseClaim, err := repair.ClaimPendingFileUpdate(
+	claimed, releaseClaim, err := repair.ClaimPendingFileUpdateExact(
 		prepared.ToVersion,
 		prepared.CreatedAt,
+		repair.UpdateTransactionID(prepared),
 		exe,
 		releasePaths,
 		2*time.Minute,
@@ -834,26 +839,50 @@ func applyLinux(targz []byte, prepared *repair.UpdateTransaction) error {
 		return fmt.Errorf("update: claim prepared transaction: %w", err)
 	}
 	defer releaseClaim()
-	return applyLinuxReleaseUnit(exe, bin, guard, cli)
+	if err := repair.MarkUpdateApplyFailedExact(claimed, "Linux update publish did not complete"); err != nil {
+		return fmt.Errorf("update: record recovery intent: %w", err)
+	}
+	if err := applyLinuxReleaseUnit(claimed, exe, bin, guard, cli); err != nil {
+		return err
+	}
+	if _, err := repair.RecordClaimedFileUpdateInstalled(claimed); err != nil {
+		return fmt.Errorf("update: record installed release unit: %w", err)
+	}
+	// The durable pending transaction now has a new identity containing every
+	// installed member state. A crash before this cleanup is still safe: startup
+	// sees that the old marker no longer matches and clears it without rollback.
+	_ = repair.ClearUpdateApplyFailureExact(claimed)
+	return nil
 }
 
 var currentExecutablePathForLinux = currentExecutablePath
 
-var applyLinuxReleaseUnit = func(exe string, bin, guard, cli []byte) error {
-	if err := writeAtomic(filepath.Join(filepath.Dir(exe), "reasonix"), cli, 0o700); err != nil {
+var applyLinuxReleaseUnit = func(claimed *repair.UpdateTransaction, exe string, bin, guard, cli []byte) error {
+	if err := repair.PublishClaimedFileUpdateMember(claimed, filepath.Join(filepath.Dir(exe), "reasonix"), cli, 0o700); err != nil {
 		return fmt.Errorf("update CLI sidecar: %w", err)
 	}
-	if err := writeAtomic(filepath.Join(filepath.Dir(exe), "reasonix-guard"), guard, 0o700); err != nil {
+	if err := repair.PublishClaimedFileUpdateMember(claimed, filepath.Join(filepath.Dir(exe), "reasonix-guard"), guard, 0o700); err != nil {
 		return fmt.Errorf("update Guard: %w", err)
 	}
-	return selfupdate.Apply(bytes.NewReader(bin), selfupdate.Options{})
+	if err := repair.PublishClaimedFileUpdateMember(claimed, exe, bin, 0o700); err != nil {
+		return fmt.Errorf("update desktop: %w", err)
+	}
+	return nil
 }
 
-func applyWindowsFile(path string, prepared *repair.UpdateTransaction) error {
+func applyWindowsFile(path, expectedSHA256 string, prepared *repair.UpdateTransaction) error {
 	if prepared == nil {
 		return fmt.Errorf("update: prepared transaction is unavailable")
 	}
-	return startWindowsUpdateHandoff(path, currentInstallDir(), currentLauncherPath(), prepared.ToVersion, prepared.CreatedAt)
+	return startWindowsUpdateHandoff(
+		path,
+		expectedSHA256,
+		currentInstallDir(),
+		currentLauncherPath(),
+		prepared.ToVersion,
+		prepared.CreatedAt,
+		repair.UpdateTransactionID(prepared),
+	)
 }
 
 func currentExecutablePath() string {

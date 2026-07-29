@@ -524,7 +524,7 @@ func TestApplyLinuxHoldsReleaseUnitLockDuringReplace(t *testing.T) {
 	currentExecutablePathForLinux = func() string { return exe }
 	entered := make(chan struct{})
 	releaseReplace := make(chan struct{})
-	applyLinuxReleaseUnit = func(string, []byte, []byte, []byte) error {
+	applyLinuxReleaseUnit = func(*repair.UpdateTransaction, string, []byte, []byte, []byte) error {
 		close(entered)
 		<-releaseReplace
 		return nil
@@ -581,6 +581,9 @@ func TestApplyLinuxHoldsReleaseUnitLockDuringReplace(t *testing.T) {
 	}
 	if err := <-lockDone; err != nil {
 		t.Fatalf("competing lock after replacement: %v", err)
+	}
+	if _, ok := repair.ReadUpdateApplyFailure(); ok {
+		t.Fatal("successful Linux release-unit publish left an interruption marker")
 	}
 }
 

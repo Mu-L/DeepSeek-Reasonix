@@ -4,8 +4,6 @@ package repair
 
 import (
 	"encoding/binary"
-	"errors"
-	"os"
 
 	"golang.org/x/sys/windows"
 )
@@ -13,17 +11,29 @@ import (
 func platformRepairPathCaseInsensitive(path string) bool {
 	parent := existingRepairPathParent(path)
 	if parent == "" {
-		return false
+		return true
 	}
-	f, err := os.Open(parent)
+	name, err := windows.UTF16PtrFromString(parent)
 	if err != nil {
-		return false
+		return true
 	}
-	defer f.Close()
+	handle, err := windows.CreateFile(
+		name,
+		windows.FILE_READ_ATTRIBUTES,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_FLAG_BACKUP_SEMANTICS,
+		0,
+	)
+	if err != nil {
+		return true
+	}
+	defer windows.CloseHandle(handle)
 
 	var info [4]byte
 	err = windows.GetFileInformationByHandleEx(
-		windows.Handle(f.Fd()),
+		handle,
 		windows.FileCaseSensitiveInfo,
 		&info[0],
 		uint32(len(info)),
@@ -32,8 +42,6 @@ func platformRepairPathCaseInsensitive(path string) bool {
 		return binary.LittleEndian.Uint32(info[:])&windows.FILE_CS_FLAG_CASE_SENSITIVE_DIR == 0
 	}
 	// Per-directory case sensitivity was added after the API itself. Systems
-	// that do not implement the query retain legacy case-insensitive lookup.
-	return errors.Is(err, windows.ERROR_INVALID_PARAMETER) ||
-		errors.Is(err, windows.ERROR_NOT_SUPPORTED) ||
-		errors.Is(err, windows.ERROR_CALL_NOT_IMPLEMENTED)
+	// that cannot answer the query retain legacy case-insensitive lookup.
+	return true
 }
