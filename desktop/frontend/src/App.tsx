@@ -1113,6 +1113,7 @@ export default function App() {
   const setSidebarCollapsed = useLayoutStore((s) => s.setSidebarCollapsed);
   const mainView = useOverlayStore((s) => s.mainView);
   const setMainView = useOverlayStore((s) => s.setMainView);
+  const automationView = mainView === "automation";
   type TimeFilter = "all" | "10" | "20" | "1h" | "3h" | "5h" | "1d";
   const [topicTimeFilter, setTopicTimeFilter] = useState<TimeFilter>(() => {
     try {
@@ -1216,7 +1217,7 @@ export default function App() {
   const setRightDockMode = useLayoutStore((s) => s.setRightDockMode);
   const terminalPanelOpen = useLayoutStore((s) => s.terminalPanelOpen);
   const setTerminalPanelOpen = useLayoutStore((s) => s.setTerminalPanelOpen);
-  const { mounted: terminalContentVisible, fitEnabled: terminalFitEnabled, prefetch: prefetchTerminalPanel } = useWarmTerminalPanel(terminalPanelOpen, terminalResizing);
+  const { mounted: terminalContentVisible, fitEnabled: terminalFitEnabled, prefetch: prefetchTerminalPanel } = useWarmTerminalPanel(terminalPanelOpen, terminalResizing, !automationView);
   const terminalHeight = useLayoutStore((s) => s.terminalHeight);
   const setTerminalHeight = useLayoutStore((s) => s.setTerminalHeight);
   const [dockRefreshKey, setDockRefreshKey] = useState(0);
@@ -1578,9 +1579,6 @@ export default function App() {
     minWidth: workspacePanelMinWidth, minRenderWidth: rightDockMinRenderWidth,
     liveWidth: liveWorkspacePanelRenderWidth,
   });
-  const automationView = mainView === "automation";
-  const effectiveWorkspacePanelRenderable = automationView ? false : workspacePanelRenderable;
-  const effectiveWorkspacePanelGridOpen = automationView ? false : workspacePanelGridOpen;
   const resolveLiveWorkspacePanelRenderWidth = useCallback(
     (preferredWidth: number, nextSidebarWidth = sidebarWidth) =>
       resolveLiveWorkspacePanelWidth({
@@ -1607,9 +1605,17 @@ export default function App() {
   // remote tabs publish readiness via remote-tab:<id>:state, which
   const visibleRuntimeState = remoteSurfaceActive ? remoteSession.transcript : state;
   const localWorkspaceDockBlocked = remoteSurfaceActive && (rightDockMode === "files" || rightDockMode === "changed");
-  const surfaceWorkspacePanelRenderable = effectiveWorkspacePanelRenderable && !localWorkspaceDockBlocked;
-  const surfaceWorkspacePanelGridOpen = effectiveWorkspacePanelGridOpen && !localWorkspaceDockBlocked;
-  const terminalSurfaceOpen = terminalPanelOpen && !remoteSurfaceActive;
+  const sidebarImDetailConnection = useMemo(
+    () => sidebarImConnections.find((connection) => connection.id === sidebarImDetailConnectionId) ?? null,
+    [sidebarImConnections, sidebarImDetailConnectionId],
+  );
+  const chatSurfaceVisible = !automationView;
+  const surfaceWorkspacePanelRenderable = chatSurfaceVisible && workspacePanelRenderable && !localWorkspaceDockBlocked;
+  const surfaceWorkspacePanelGridOpen = chatSurfaceVisible && workspacePanelGridOpen && !localWorkspaceDockBlocked;
+  const surfaceWorkspacePanelOverlay = surfaceWorkspacePanelRenderable && workspacePanelOverlay;
+  const surfaceWorkspacePanelMaximized = chatSurfaceVisible && workspacePanelOpen && workspacePanelMaximized;
+  const terminalSurfaceOpen = chatSurfaceVisible && terminalPanelOpen && !remoteSurfaceActive;
+  const statusBarVisible = chatSurfaceVisible && !sidebarImDetailConnection;
   const activePlanRevisionInsertRequest =
     planRevisionInsertRequest &&
     planRevisionInsertRequest.tabId === activeTabId &&
@@ -1664,10 +1670,6 @@ export default function App() {
     // 560 ceiling, so the user's remembered width is preserved when reopened.
     setRightDockTreeWidth(rightDockTreeWidthClamp(treeWidth, workspacePanelAvailableWidth));
   }, [rightDockTreeWidthClamp, workspacePanelAvailableWidth]);
-  const sidebarImDetailConnection = useMemo(
-    () => sidebarImConnections.find((connection) => connection.id === sidebarImDetailConnectionId) ?? null,
-    [sidebarImConnections, sidebarImDetailConnectionId],
-  );
   useEffect(() => {
     let cancelled = false;
     if (!activeTab?.topicId) {
@@ -2911,7 +2913,7 @@ export default function App() {
   }, [activeWorkspaceRoot]);
 
   const toggleWorkspacePanel = useCallback(() => {
-    if (effectiveWorkspacePanelRenderable) {
+    if (surfaceWorkspacePanelRenderable) {
       closeWorkspacePanel();
       return;
     }
@@ -2924,7 +2926,7 @@ export default function App() {
     // Reopen with the previously active tab (rightDockMode is kept in the
     // store across close/open) instead of forcing "context".
     openWorkspacePanel();
-  }, [closeWorkspacePanel, desktopLayoutStyle, effectiveWorkspacePanelRenderable, openWorkspacePanel, rightDockMode]);
+  }, [closeWorkspacePanel, desktopLayoutStyle, openWorkspacePanel, rightDockMode, surfaceWorkspacePanelRenderable]);
 
   const openRightDockMode = useCallback(
     (mode: RightDockMode) => {
@@ -2950,12 +2952,13 @@ export default function App() {
   useEffect(() => { setVerificationRevealRequest(null); }, [activeTabId, state.completionSummary, state.turnStartAt]);
 
   const toggleTerminalPanel = useCallback(() => { if (remoteSurfaceActive) return;
+    if (automationView) { setMainView("chat"); setTerminalPanelOpen(true); saveTerminalPanelOpen(true); return; }
     setTerminalPanelOpen((prev) => {
       const next = !prev;
       saveTerminalPanelOpen(next);
       return next;
     });
-  }, [remoteSurfaceActive, setTerminalPanelOpen]);
+  }, [automationView, remoteSurfaceActive, setMainView, setTerminalPanelOpen]);
 
   const openTerminalForPath = useCallback(
     (path = ".") => { if (remoteSurfaceActive) return;
@@ -2972,9 +2975,10 @@ export default function App() {
   }, [toggleTerminalPanel]);
   useGlobalShortcut("terminal.newSession", () => {
     if (!activeTabId || remoteSurfaceActive) return;
+    if (automationView) setMainView("chat");
     setTerminalPanelOpen(true); saveTerminalPanelOpen(true);
     void useTerminalStore.getState().createSession(activeTabId, ".", "default").catch(() => {});
-  }, [activeTabId, remoteSurfaceActive, setTerminalPanelOpen]);
+  }, [activeTabId, automationView, remoteSurfaceActive, setMainView, setTerminalPanelOpen]);
 
   useEffect(() => {
     if (!remoteExplorerOpen) return;
@@ -3943,7 +3947,7 @@ export default function App() {
   }, [closeTransientOverlays]);
   useGlobalShortcut("tab.close", () => {
     if (activeTabId) void handleTabClose(activeTabId);
-  }, [activeTabId, handleTabClose], Boolean(activeTabId));
+  }, [activeTabId, handleTabClose], Boolean(activeTabId) && !automationView);
   useGlobalShortcut("shortcuts.show", () => setShortcutsOpen(true));
   useGlobalShortcut("sidebar.toggle", toggleSidebar, [toggleSidebar]);
 
@@ -4323,10 +4327,11 @@ export default function App() {
         sidebarWorkbench ? "app--workbench" : "",
         sidebarCreation ? "app--creation" : "",
         !sidebarWorkbench && !sidebarCreation ? "app--classic" : "",
+        automationView ? "app--automation" : "",
       ].filter(Boolean).join(" ")}
     >
       <ThemeBackground />
-      {sidebarWorkbench && <div className="app__dock-toggle">{dockToggleButton}</div>}
+      {sidebarWorkbench && chatSurfaceVisible && <div className="app__dock-toggle">{dockToggleButton}</div>}
       <div
         ref={layoutRef}
         className={[
@@ -4334,16 +4339,17 @@ export default function App() {
           sidebarWorkbench ? "layout--workbench" : "",
           workbenchChromeHidden ? "layout--workbench-chrome-hidden" : "",
           sidebarCreation ? "layout--creation-chrome-hidden" : "",
-          sidebarImDetailConnection ? "layout--statusbar-hidden" : "",
+          automationView ? "layout--automation" : "",
+          !statusBarVisible ? "layout--statusbar-hidden" : "",
           sidebarCollapsed ? "layout--sidebar-collapsed" : "",
           sidebarResizing ? "layout--resizing layout--sidebar-resizing" : "",
           surfaceWorkspacePanelGridOpen ? "layout--workspace-open" : "",
-          workspacePanelOverlay ? "layout--workspace-overlay" : "",
-          "layout--terminal-drawer-open",
+          surfaceWorkspacePanelOverlay ? "layout--workspace-overlay" : "",
+          !automationView ? "layout--terminal-drawer-open" : "",
           terminalSurfaceOpen ? "layout--terminal-drawer-expanded" : "",
-          terminalResizing ? "layout--terminal-resizing" : "",
-          workspacePanelOpen && workspacePanelMaximized ? "layout--workspace-maximized" : "",
-          workspacePanelResizing ? "layout--resizing layout--workspace-resizing" : "",
+          !automationView && terminalResizing ? "layout--terminal-resizing" : "",
+          surfaceWorkspacePanelMaximized ? "layout--workspace-maximized" : "",
+          !automationView && workspacePanelResizing ? "layout--resizing layout--workspace-resizing" : "",
         ]
           .filter(Boolean)
           .join(" ")}
@@ -4457,8 +4463,9 @@ export default function App() {
                   <span>{t("creation.sidebar.messageChannels")}</span>
                 </button>
                 <button
-                  className="sidebar-feature-zone__item"
+                  className={`sidebar-feature-zone__item${automationView ? " sidebar-feature-zone__item--active" : ""}`}
                   type="button"
+                  aria-current={automationView ? "page" : undefined}
                   onClick={() => setMainView("automation")}
                 >
                   <AlarmClock size={14} aria-hidden="true" />
@@ -4565,7 +4572,8 @@ export default function App() {
               {!sidebarCreation && (
                 <Tooltip label={t("heartbeat.scheduler")} fill side="right" disabled={sidebarNavTooltipDisabled}>
                   <button
-                    className="sidebar__navitem"
+                    className={`sidebar__navitem${automationView ? " sidebar__navitem--active" : ""}`}
+                    aria-current={automationView ? "page" : undefined}
                     onClick={() => setMainView("automation")}
                   >
                     <AlarmClock size={15} />
@@ -4602,7 +4610,7 @@ export default function App() {
           onKeyDown={resizeSidebarWithKeyboard}
           onDoubleClick={() => setExpandedSidebarWidth(desktopLayoutStyle === "creation" ? defaultCreationSidebarWidth() : defaultSidebarWidth())}
         />
-        {sidebarCreation && (
+        {sidebarCreation && !automationView && (
           <button
             className={`sidebar-collapse-toggle${sidebarCollapsed ? " sidebar-collapse-toggle--collapsed" : ""}${sidebarTogglePressed ? " sidebar-collapse-toggle--pressed" : ""}`}
             type="button"
@@ -4618,9 +4626,7 @@ export default function App() {
         <section className={`chat-pane${creationEmptyHero ? " chat-pane--creation-empty" : ""}`}>
           {mainView === "automation" ? (
             <Suspense fallback={<div className="heartbeat-page" />}>
-              <HeartbeatView onOpenTopic={(scope, workspaceRoot, topicId) => {
-                void handleOpenTopic(scope, workspaceRoot, topicId);
-              }} />
+              <HeartbeatView onToggleSidebar={toggleSidebar} onOpenTopic={(scope, workspaceRoot, topicId) => { void handleOpenTopic(scope, workspaceRoot, topicId); }} />
             </Suspense>
           ) : (
           <>
@@ -5223,7 +5229,7 @@ export default function App() {
             className={[
               "workbench-dock",
               `workbench-dock--${rightDockMode}`,
-              workspacePanelOverlay ? "workbench-dock--overlay" : "",
+              surfaceWorkspacePanelOverlay ? "workbench-dock--overlay" : "",
             ].join(" ")}
             aria-label={t("rightDock.workbench")}
           >
@@ -5362,26 +5368,19 @@ export default function App() {
               </Suspense>
             )}
           </aside>
-          <button
-            className="terminal-drawer-resizer"
-            type="button"
-            role="separator"
-            aria-orientation="horizontal"
-            aria-label={t("terminal.resize")}
-            aria-valuemin={TERMINAL_MIN_HEIGHT}
-            aria-valuemax={terminalResizeMaxHeight}
-            aria-valuenow={liveTerminalHeight ?? terminalRenderHeight}
-            aria-hidden={!terminalSurfaceOpen}
-            tabIndex={terminalSurfaceOpen ? 0 : -1}
-            onPointerDown={startTerminalResize}
-            onKeyDown={resizeTerminalWithKeyboard}
-            onDoubleClick={() => {
-              setSavedTerminalHeight(TERMINAL_DEFAULT_HEIGHT);
-            }}
-          />
+          {!automationView && (
+            <button
+              className="terminal-drawer-resizer" type="button" role="separator"
+              aria-orientation="horizontal" aria-label={t("terminal.resize")}
+              aria-valuemin={TERMINAL_MIN_HEIGHT} aria-valuemax={terminalResizeMaxHeight}
+              aria-valuenow={liveTerminalHeight ?? terminalRenderHeight} aria-hidden={!terminalSurfaceOpen}
+              tabIndex={terminalSurfaceOpen ? 0 : -1} onPointerDown={startTerminalResize}
+              onKeyDown={resizeTerminalWithKeyboard} onDoubleClick={() => setSavedTerminalHeight(TERMINAL_DEFAULT_HEIGHT)}
+            />
+          )}
         </>
 
-        {!sidebarImDetailConnection && (
+        {statusBarVisible && (
           <StatusBar
             context={visibleRuntimeState.context}
             usage={visibleRuntimeState.usage}

@@ -237,7 +237,8 @@ eq(
   "footer compaction applies only while the terminal is expanded outside Creation mode",
 );
 eq(
-  /sidebarImDetailConnection \? "layout--statusbar-hidden" : ""/.test(appSource)
+  /const statusBarVisible = chatSurfaceVisible && !sidebarImDetailConnection/.test(appSource)
+    && /!statusBarVisible \? "layout--statusbar-hidden" : ""/.test(appSource)
     && /\.layout\.layout--statusbar-hidden,[\s\S]*?--statusbar-height: 0px;/.test(stylesSource),
   true,
   "IM detail collapses the status bar row when the bar is not rendered",
@@ -336,7 +337,7 @@ eq(
   "pointer and keyboard intent prefetch the terminal chunk before opening from the topic bar",
 );
 eq(
-  /useWarmTerminalPanel\(terminalPanelOpen, terminalResizing\)/.test(appSource)
+  /useWarmTerminalPanel\(terminalPanelOpen, terminalResizing, !automationView\)/.test(appSource)
     && /if \(open\) setMounted\(true\)/.test(terminalLifecycleSource)
     && !/setMounted\(false\)/.test(terminalLifecycleSource),
   true,

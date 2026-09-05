@@ -194,11 +194,10 @@ console.log("\nbundle budgets");
 // 0.5 KiB gzip on the initial path. The model-capability resolver and its
 // read-only provider badges add a measured 0.2 KiB including gzip/toolchain
 // rounding. Direct topic-bar actions replace the overflow trigger; together
-// with per-model image guidance and shared model matching, the merged path
-// measures 464.5 KiB. Export formats and the provider editor remain lazy.
-// Foreground and hourly updater refresh brings the merged path to 464.655 KiB;
-// retain only the next decimal ceiling.
-const initialJSBudgetKiB = 464.7;
+// with per-model image guidance, shared model matching, Automation's page
+// projection, and foreground/hourly updater refresh, retain the measured
+// merged-path ceiling: 464.8 KiB gzip. Export and provider editors stay lazy.
+const initialJSBudgetKiB = 464.8;
 assertBudget("initial JavaScript gzip", initialJSGzip, initialJSBudgetKiB * 1024);
 assertBudget("largest initial JavaScript chunk gzip", largestInitialJS, 280 * 1024);
 // Render-blocking CSS is intentionally absent: styles.css loads deferred via
@@ -217,9 +216,10 @@ if (initialCSS.length > 0) {
 // the retained-transcript navigation allowance; keep the ratchet explicit.
 // The navigation mask's stable composer footprint and remote tab/surface
 // states bring the merged shell to roughly 115.7 KiB gzip.
-// The one-row model configuration list and responsive stacking measure
-// 116.3 KiB gzip while reusing the shared segmented-control styles.
-assertBudget("deferred app-shell CSS gzip", appShellCSSGzip, 116.4 * 1024);
+// The one-row model configuration list, responsive stacking, and Automation's
+// shared title-safe shell measure 116.423 KiB gzip while reusing existing
+// layout primitives. Retain only the next one-decimal ceiling.
+assertBudget("deferred app-shell CSS gzip", appShellCSSGzip, 116.5 * 1024);
 if (localeChunks.length !== 2) {
   throw new Error(`expected 2 on-demand Chinese locale chunks, found ${localeChunks.length}`);
 }
@@ -366,11 +366,8 @@ const rawInitialBytes = [...initialJS, ...initialCSS, ...appShellCSS]
 // On the current main-v2 base, the combined measured path is 2474.6 KiB;
 // the model-capability helper and localized status copy add 0.9 KiB; retain
 // the smallest bounded cross-platform ceiling.
-// Direct topic-bar actions, the macOS single-row dock tabs, and the responsive
-// model configuration list measure 2479.7 KiB raw together. Retain only the
-// next decimal ceiling without relaxing the independent chunk gates.
-// The updater refresh owner brings the merged path to 2480.267 KiB raw;
-// retain only the next decimal ceiling.
-const rawInitialBudgetKiB = 2_480.3;
+// Automation's shell projection and the updater refresh owner both remain
+// on the merged initial path: 2481.7 KiB raw at the next decimal ceiling.
+const rawInitialBudgetKiB = 2_481.7;
 assertBudget("initial raw JavaScript and CSS", rawInitialBytes, rawInitialBudgetKiB * 1024);
 assertBudget("largest initial JavaScript chunk raw", largestInitialJSRaw, 1_000 * 1024);
