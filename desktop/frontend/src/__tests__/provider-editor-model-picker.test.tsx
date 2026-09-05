@@ -356,9 +356,11 @@ ok(
   rootEl.textContent?.includes("This official endpoint does not accept images for this model.") === true,
   "provider editor honors backend vision capability for endpoints outside the legacy frontend heuristic",
 );
+const displayedRequestURL = (input: HTMLInputElement | null) =>
+  document.getElementById(input?.getAttribute("aria-describedby") ?? "")?.querySelector("code")?.textContent;
 const customProviderUrlInput = rootEl.querySelector<HTMLInputElement>(".provider-url-input");
 ok(rootEl.querySelectorAll('input[type="radio"]:not(.sr-only)').length === 0, "existing custom providers no longer expose an address mode selector");
-ok(customProviderUrlInput?.value === backendUnsupportedCustomProvider.baseUrl && rootEl.textContent?.includes("https://eu.deepseek.com/v1/chat/completions") === true, "legacy base-only providers display their previously effective request URL");
+ok(customProviderUrlInput?.value === backendUnsupportedCustomProvider.baseUrl && displayedRequestURL(customProviderUrlInput) === "https://eu.deepseek.com/v1/chat/completions", "legacy base-only providers display their previously effective request URL");
 ok(rootEl.querySelector<HTMLInputElement>('input[placeholder="e.g. my-proxy"]')?.disabled === true, "existing custom provider name is locked");
 ok(rootEl.querySelector<HTMLInputElement>('input[placeholder="e.g. my-proxy"]')?.nextElementSibling?.textContent === "Changing the provider name is not supported yet", "existing custom provider editor shows the rename hint");
 
@@ -370,7 +372,7 @@ await act(async () => {
   await flushPromises();
 });
 const legacyProviderUrlInput = rootEl.querySelector<HTMLInputElement>(".provider-url-input");
-ok(legacyProviderUrlInput?.value === legacyChatURLProvider.baseUrl && rootEl.textContent?.includes("https://legacy.example.com/chat/completions") === true, "legacy OpenAI chat URLs display their historically normalized effective endpoint");
+ok(legacyProviderUrlInput?.value === legacyChatURLProvider.baseUrl && displayedRequestURL(legacyProviderUrlInput) === "https://legacy.example.com/chat/completions", "legacy OpenAI chat URLs display their historically normalized effective endpoint");
 const saveButton = Array.from(rootEl.querySelectorAll<HTMLButtonElement>("button")).find(
   (button) => button.textContent?.trim() === "Save",
 );
