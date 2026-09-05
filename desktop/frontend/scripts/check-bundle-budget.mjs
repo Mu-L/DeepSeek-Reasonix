@@ -196,9 +196,11 @@ console.log("\nbundle budgets");
 // rounding. The integrated management shell, image capability controls, and
 // upstream updater refresh measure 465.4 KiB gzip (base: 464.7 KiB).
 // Keep the next decimal ceiling and leave feature editors lazy.
-// Rich-link menus and keyboard focus ownership measure 465.802 KiB gzip
-// (base: 465.3 KiB). Retain the next decimal ceiling.
-const initialJSBudgetKiB = 465.9;
+// Durable protocol recovery controls and search-source status add 1.2 KiB
+// over the same-environment main-v2 build (465.4 -> 466.6 KiB gzip).
+// Keep one decimal of cross-platform headroom for this measured shell change.
+// Integrating main-v2 rich-link menus measures 466.905 KiB combined.
+const initialJSBudgetKiB = 467.0;
 assertBudget("initial JavaScript gzip", initialJSGzip, initialJSBudgetKiB * 1024);
 assertBudget("largest initial JavaScript chunk gzip", largestInitialJS, 280 * 1024);
 // Render-blocking CSS is intentionally absent: styles.css loads deferred via
@@ -271,8 +273,11 @@ for (const path of localeChunks) {
   // dropping the unknown-state explanation.
   // Image input mode, provenance and unknown-state guidance measure 60.724 KiB
   // zh and 61.570 KiB zh-TW. Keep the next decimal ceiling per locale.
-  // Eight rich-link action strings measure 61.720/60.880 KiB (zh-TW/zh).
-  const budget = name.startsWith("zh-TW-") ? 61.8 * 1024 : 60.9 * 1024;
+  // Protocol recovery and source-availability copy measure 60.927 KiB zh
+  // and 61.789 KiB zh-TW (base: 60.8 / 61.6 rounded).
+  // Rich-link action copy on the current base brings these to
+  // 61.027/61.881 KiB; retain bounded cross-platform headroom.
+  const budget = name.startsWith("zh-TW-") ? 62.0 * 1024 : 61.1 * 1024;
   assertBudget(`${name} gzip`, gzipBytes(path), budget);
 }
 
@@ -369,7 +374,9 @@ const rawInitialBytes = [...initialJS, ...initialCSS, ...appShellCSS]
 // the model-capability helper and localized status copy add 0.9 KiB; retain
 // the smallest bounded cross-platform ceiling.
 // Retain the upstream updater ceiling and independent chunk gates.
-// Rich-link menus add 1.2 KiB raw; measured total is 2482.069 KiB.
-const rawInitialBudgetKiB = 2_482.1;
+// Recovery controls add 3.6 KiB raw over the measured 2480.9 KiB base;
+// current payload is 2484.509 KiB. Retain only bounded toolchain headroom.
+// With the current-base rich-link menus: 2485.715 KiB raw.
+const rawInitialBudgetKiB = 2_485.9;
 assertBudget("initial raw JavaScript and CSS", rawInitialBytes, rawInitialBudgetKiB * 1024);
 assertBudget("largest initial JavaScript chunk raw", largestInitialJSRaw, 1_000 * 1024);

@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"reasonix/internal/agent/testutil"
 	"reasonix/internal/capability"
 	"reasonix/internal/event"
 	"reasonix/internal/plugin"
@@ -212,4 +213,33 @@ func requiredQueryMCPServer(t *testing.T, toolCalls *atomic.Int32) *httptest.Ser
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": *request.ID, "result": result})
 	}))
+}
+
+// A malformed call is an unexecuted tool result, not a failed network attempt.
+// A legal call in the same batch stays completed while the model corrects it.
+func TestToolArgumentsCorrectedAfterStopWithoutRepeatingSuccess(t *testing.T) {
+	good := provider.ToolCall{ID: "good", Name: "echo", Arguments: `{"text":"first"}`}
+	bad := provider.ToolCall{ID: "bad", Name: "echo", Arguments: `{"text":123}`}
+	fixed := provider.ToolCall{ID: "fixed", Name: "echo", Arguments: `{"text":"second"}`}
+	p := testutil.NewMock("test", testutil.Turn{Chunks: []provider.Chunk{{Type: provider.ChunkToolCall, ToolCall: &good}, {Type: provider.ChunkToolCall, ToolCall: &bad}, {Type: provider.ChunkUsage, Usage: &provider.Usage{FinishReason: "stop"}}, {Type: provider.ChunkDone}}}, testutil.Turn{ToolCalls: []provider.ToolCall{fixed}}, testutil.Turn{Text: "done"})
+	sink := &recordSink{}
+	a := New(p, echoRegistry(), NewSession("system"), Options{}, sink)
+	if err := a.Run(withNoClosedLoop(context.Background()), "use echo"); err != nil {
+		t.Fatal(err)
+	}
+	if p.CallCount() != 3 || len(sink.kinds(event.Retrying)) != 0 {
+		t.Fatal("argument correction used network retry")
+	}
+	results := map[string]string{}
+	for _, m := range a.Session().Snapshot() {
+		if m.Role == provider.RoleTool {
+			if _, exists := results[m.ToolCallID]; exists {
+				t.Fatal("duplicate result")
+			}
+			results[m.ToolCallID] = m.Content
+		}
+	}
+	if results["good"] != "echoed: first" || results["fixed"] != "echoed: second" || !strings.Contains(results["bad"], "text") {
+		t.Fatalf("results=%+v", results)
+	}
 }

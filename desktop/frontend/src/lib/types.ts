@@ -1,3 +1,4 @@
+import type { RecoveryEventFields } from "./recoveryStatus";
 // Wire contract — mirrors desktop/wire.go (itself mirroring internal/serve/wire.go).
 // One event channel carries every kind; `kind` discriminates the payload.
 import type { HistoryServerSearch } from "./searchSources";
@@ -360,7 +361,7 @@ export interface MemoryCitation {
   kind?: string;
 }
 
-export interface WireEvent {
+export interface WireEvent extends RecoveryEventFields {
   kind: EventKind;
   turnId?: string;
   seq?: number;
@@ -387,8 +388,8 @@ export interface WireEvent {
   submissionId?: string; // Opaque correlation for the exact optimistic user submission.
   outcome?: "completed" | "partial" | "blocked" | "final_readiness" | "recovery_paused" | "completion_uncertain";
   readiness?: WireFinalReadiness;
-  retryAttempt?: number;
-  retryMax?: number;
+  protocolRecovery?: { id: string };
+  diagnostic?: { kind: string; status?: number; traceId?: string };
   /** Optional: "headers" | "stream". Older clients ignore unknown fields. */
   retryScope?: "headers" | "stream" | "protocol";
   streamAttempt?: WireStreamAttempt;
@@ -762,6 +763,8 @@ export interface HistoryMessage {
   archive?: string;
   decisionReceipt?: WireDecisionReceipt;
   readiness?: WireFinalReadiness;
+  protocolRecovery?: { id: string };
+  diagnostic?: { kind: string; status?: number; traceId?: string };
   serverSearch?: HistoryServerSearch[];
 }
 

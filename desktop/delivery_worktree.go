@@ -548,48 +548,13 @@ func (a *App) reserveWorktreeMergeRuntime(sourceRoot, worktreeRoot string) (func
 }
 
 func holdWorktreeMergeLeases(parent context.Context, roots ...string) (func(), error) {
-	type leaseRoot struct{ canonical, root string }
-	unique := map[string]string{}
-	for _, root := range roots {
-		root = strings.TrimSpace(root)
-		if root == "" {
-			continue
-		}
-		canonical, err := workspacelease.CanonicalWorkspace(root)
-		if err != nil {
-			return nil, fmt.Errorf("resolve merge workspace lease: %w", err)
-		}
-		unique[canonical] = root
-	}
-	ordered := make([]leaseRoot, 0, len(unique))
-	for canonical, root := range unique {
-		ordered = append(ordered, leaseRoot{canonical: canonical, root: root})
-	}
-	sort.Slice(ordered, func(i, j int) bool { return ordered[i].canonical < ordered[j].canonical })
 	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
-	releases := make([]func(), 0, len(ordered))
-	for _, item := range ordered {
-		owner, err := workspacelease.New(item.root, config.WorkspaceLeaseDir(), nil)
-		if err != nil {
-			cancel()
-			runReleasesReverse(releases)
-			return nil, fmt.Errorf("create merge workspace lease: %w", err)
-		}
-		release, err := owner.HoldWrite(ctx)
-		if err != nil {
-			cancel()
-			runReleasesReverse(releases)
-			return nil, fmt.Errorf("wait for merge workspace lease: %w", err)
-		}
-		releases = append(releases, release)
+	release, err := workspacelease.HoldWriteRoots(ctx, config.WorkspaceLeaseDir(), roots...)
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("wait for merge workspace lease: %w", err)
 	}
-	return func() { runReleasesReverse(releases); cancel() }, nil
-}
-
-func runReleasesReverse(releases []func()) {
-	for _, release := range slices.Backward(releases) {
-		release()
-	}
+	return func() { release(); cancel() }, nil
 }
 
 func (a *App) worktreeRuntimeReferenced(worktreeRoot string) bool {

@@ -1,3 +1,4 @@
+import { searchOutputMetadata } from "../lib/searchSources";
 import { memo, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Suspense, lazy } from "react";
 import { ChevronRight, Compass } from "lucide-react";
@@ -322,7 +323,10 @@ export const ToolCard = memo(function ToolCard({ item, subcalls, tabId, displayN
   }, [isWebSearch, item.searchSources]);
   const searchVisibleCount = searchPresentation?.visible.length ?? item.searchSources?.length ?? 0;
   const searchHiddenCount = searchPresentation?.hiddenCount ?? 0;
-  const searchResultLabel = isWebSearch && searchVisibleCount === 0 && searchHiddenCount > 0
+  const searchMetadata = searchOutputMetadata(effectiveOutput);
+  const searchSummary = searchMetadata.summary ?? item.searchSummary;
+  const searchSourcesMissing = (item.searchSourcesStatus ?? searchMetadata.status) === "not_provided";
+  const searchResultLabel = searchSourcesMissing ? t("sources.notProvided") : isWebSearch && searchVisibleCount === 0 && searchHiddenCount > 0
     ? t("sources.noValid")
     : t("tool.searchResults", { n: searchVisibleCount });
   const isShellCard = Boolean(item.isShell || item.name === "bash" || execution);
@@ -345,7 +349,7 @@ export const ToolCard = memo(function ToolCard({ item, subcalls, tabId, displayN
   // user sees progress; closed by default once settled.
   const hasArchivedOnDemandBody = Boolean(item.dataArchived && tabId);
   const hasArgsOrOutput = !previewDiff && diffs.length === 0 && (isWebSearch
-    ? Boolean(effectiveArgs || searchVisibleCount || searchHiddenCount)
+    ? Boolean(effectiveArgs || searchVisibleCount || searchHiddenCount || searchSourcesMissing || searchSummary || hasArchivedOnDemandBody)
     : Boolean(effectiveArgs || displayOutput || hasArchivedOnDemandBody));
 
   // Shell output: split into preview + "show all" toggle.
@@ -582,6 +586,7 @@ export const ToolCard = memo(function ToolCard({ item, subcalls, tabId, displayN
         {isWebSearch && hasArgsOrOutput && (
           <div className="tool__search-summary">
             {subject && <div className="tool__search-query">{t("tool.searchQuery", { query: subject })}</div>}
+            {searchSummary && <div className="tool__search-summary-text">{searchSummary}</div>}
             <div className="tool__search-count">
               {searchResultLabel}
               {searchHiddenCount > 0 && ` · ${t("sources.hidden", { n: searchHiddenCount })}`}

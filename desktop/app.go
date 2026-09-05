@@ -5156,15 +5156,16 @@ type HistoryMessage struct {
 	ToolResultError    string                    `json:"toolResultError,omitempty"`
 	// Execution is local shell metadata restored onto ToolCards after history
 	// reload. Omitted when absent so older frontends ignore it safely.
-	Execution       *provider.ToolExecution     `json:"execution,omitempty"`
-	Pending         bool                        `json:"pending,omitempty"`
-	Trigger         string                      `json:"trigger,omitempty"`
-	Messages        int                         `json:"messages,omitempty"`
-	Summary         string                      `json:"summary,omitempty"`
-	Archive         string                      `json:"archive,omitempty"`
-	DecisionReceipt *provider.DecisionReceipt   `json:"decisionReceipt,omitempty"`
-	Readiness       *event.FinalReadiness       `json:"readiness,omitempty"`
-	ServerSearch    []provider.ServerSearchCall `json:"serverSearch,omitempty"`
+	Execution        *provider.ToolExecution          `json:"execution,omitempty"`
+	Pending          bool                             `json:"pending,omitempty"`
+	Trigger          string                           `json:"trigger,omitempty"`
+	Messages         int                              `json:"messages,omitempty"`
+	Summary          string                           `json:"summary,omitempty"`
+	Archive          string                           `json:"archive,omitempty"`
+	DecisionReceipt  *provider.DecisionReceipt        `json:"decisionReceipt,omitempty"`
+	Readiness        *event.FinalReadiness            `json:"readiness,omitempty"`
+	ProtocolRecovery *provider.ProtocolRecoveryAction `json:"protocolRecovery,omitempty"`
+	ServerSearch     []provider.ServerSearchCall      `json:"serverSearch,omitempty"`
 }
 
 type HistoryToolCall struct {

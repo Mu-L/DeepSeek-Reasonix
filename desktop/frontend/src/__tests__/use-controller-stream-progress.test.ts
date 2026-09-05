@@ -375,6 +375,11 @@ function ev(s: typeof initialState, e: WireEvent) {
   s = ev(s, { kind: "retrying", retryAttempt: 3, retryMax: 10 } as WireEvent);
   eq(s.retry?.attempt, 3, "retry status keeps the current attempt");
   eq(s.retry?.max, 10, "retry status keeps the retry budget");
+  const recovery = { phase: "headers", next_attempt_at: Date.now() + 60_000, waited_ms: 14_000, waiting: true };
+  s = ev(s, { kind: "retrying", retryAttempt: 4, retryMax: 3, recovery } as WireEvent);
+  eq(s.retry?.recovery?.waiting, true, "continuous wait survives the controller projection");
+  eq(s.retry?.recovery?.next_attempt_at, recovery.next_attempt_at, "countdown uses the provider recovery deadline");
+
   eq(s.running, true, "retry event restores the active turn");
   eq(s.turnActive, true, "retry event restores the turn epoch");
   eq(s.cancellable, true, "retry event keeps Stop and Escape cancellation available");

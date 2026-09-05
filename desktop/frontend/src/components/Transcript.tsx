@@ -732,7 +732,9 @@ export function Transcript({
           <NoticeCard
             item={row.item}
             actionDisabled={running}
-            onAction={row.item.action === "continue_delivery"
+            onAction={row.item.action === "recover_context"
+              ? () => onPrompt(`/recover-context ${row.item.recoveryId}`)
+              : row.item.action === "continue_delivery"
               ? (onDeliveryContinue ?? (() => onPrompt(t("notice.deliveryIncompleteContinuePrompt"))))
               : row.item.action === "open_changes"
                 ? onOpenChanges
