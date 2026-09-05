@@ -289,6 +289,14 @@ export const zh: Record<DictKey, string> = {
   "externalOpener.saveAs": "另存为…",
   "externalOpener.saved": "已保存到 {path}",
   "externalOpener.persistFailed": "已打开，但无法将 {name} 保存为默认：{error}",
+  "richLink.menuAriaLabel": "链接操作",
+  "richLink.openInBrowser": "在浏览器中打开",
+  "richLink.composeEmail": "写邮件",
+  "richLink.copyLink": "复制链接",
+  "richLink.copyReference": "复制引用",
+  "richLink.copyEmail": "复制邮箱地址",
+  "richLink.copied": "已复制",
+  "richLink.copyFailed": "复制失败",
 
   // 范围标签
   "scope.global": "范围：全局",

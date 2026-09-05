@@ -196,7 +196,9 @@ console.log("\nbundle budgets");
 // rounding. The integrated management shell, image capability controls, and
 // upstream updater refresh measure 465.4 KiB gzip (base: 464.7 KiB).
 // Keep the next decimal ceiling and leave feature editors lazy.
-const initialJSBudgetKiB = 465.5;
+// Rich-link menus and keyboard focus ownership measure 465.802 KiB gzip
+// (base: 465.3 KiB). Retain the next decimal ceiling.
+const initialJSBudgetKiB = 465.9;
 assertBudget("initial JavaScript gzip", initialJSGzip, initialJSBudgetKiB * 1024);
 assertBudget("largest initial JavaScript chunk gzip", largestInitialJS, 280 * 1024);
 // Render-blocking CSS is intentionally absent: styles.css loads deferred via
@@ -269,7 +271,8 @@ for (const path of localeChunks) {
   // dropping the unknown-state explanation.
   // Image input mode, provenance and unknown-state guidance measure 60.724 KiB
   // zh and 61.570 KiB zh-TW. Keep the next decimal ceiling per locale.
-  const budget = name.startsWith("zh-TW-") ? 61.7 * 1024 : 60.8 * 1024;
+  // Eight rich-link action strings measure 61.720/60.880 KiB (zh-TW/zh).
+  const budget = name.startsWith("zh-TW-") ? 61.8 * 1024 : 60.9 * 1024;
   assertBudget(`${name} gzip`, gzipBytes(path), budget);
 }
 
@@ -366,6 +369,7 @@ const rawInitialBytes = [...initialJS, ...initialCSS, ...appShellCSS]
 // the model-capability helper and localized status copy add 0.9 KiB; retain
 // the smallest bounded cross-platform ceiling.
 // Retain the upstream updater ceiling and independent chunk gates.
-const rawInitialBudgetKiB = 2_481.7;
+// Rich-link menus add 1.2 KiB raw; measured total is 2482.069 KiB.
+const rawInitialBudgetKiB = 2_482.1;
 assertBudget("initial raw JavaScript and CSS", rawInitialBytes, rawInitialBudgetKiB * 1024);
 assertBudget("largest initial JavaScript chunk raw", largestInitialJSRaw, 1_000 * 1024);

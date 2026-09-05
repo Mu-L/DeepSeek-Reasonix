@@ -288,6 +288,14 @@ export const en = {
   "externalOpener.saveAs": "Save as…",
   "externalOpener.saved": "Saved to {path}",
   "externalOpener.persistFailed": "Opened, but could not save {name} as default: {error}",
+  "richLink.menuAriaLabel": "Link actions",
+  "richLink.openInBrowser": "Open in browser",
+  "richLink.composeEmail": "Compose email",
+  "richLink.copyLink": "Copy link",
+  "richLink.copyReference": "Copy reference",
+  "richLink.copyEmail": "Copy email address",
+  "richLink.copied": "Copied",
+  "richLink.copyFailed": "Could not copy",
 
   // scope labels
   "scope.global": "Scope: Global",
