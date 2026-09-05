@@ -1,3 +1,4 @@
+import { matchingModelKey } from "./providerImageInput";
 import type { ProviderModelOverrideView } from "./types";
 
 export type ModelDraft = { model: string; context: string; output: string; vision: "auto" | "yes" | "no" };
@@ -15,11 +16,12 @@ export function modelDraftError(draft: ModelDraft, existing: string[], original?
 
 /** Keep unedited reasoning and future view fields when changing one model. */
 export function applyModelDraft(overrides: ProviderModelOverrideView[], draft: ModelDraft, original?: string): ProviderModelOverrideView[] {
-  const previous = overrides.find((item) => item.model === original);
+  const key = matchingModelKey(overrides.map((item) => item.model), original ?? draft.model);
+  const previous = overrides.find((item) => item.model === key);
   const next: ProviderModelOverrideView = {
     reasoningProtocol: "", supportedEfforts: [], defaultEffort: "", ...previous,
     model: draft.model.trim(), contextWindow: Number(draft.context) || 0, maxOutputTokens: Number(draft.output) || 0,
     vision: draft.vision === "auto" ? null : draft.vision === "yes",
   };
-  return [...overrides.filter((item) => item.model !== original && item.model !== next.model), next];
+  return [...overrides.filter((item) => item.model !== key && item.model !== next.model), next];
 }

@@ -4,7 +4,7 @@
     "commented-code": 0,
     "complexity": 1961,
     "essay": 1966,
-    "file-size": 108849,
+    "file-size": 108949,
     "function-size": 8448,
     "layering": 1,
     "marker": 0,
@@ -25,7 +25,7 @@
     "desktop/app.go": {
       "complexity": 57,
       "essay": 63,
-      "file-size": 11046,
+      "file-size": 11056,
       "function-size": 354,
       "struct-state": 15
     },
@@ -102,10 +102,13 @@
       "file-size": 2641
     },
     "desktop/frontend/src/components/Composer.tsx": {
-      "file-size": 3998
+      "file-size": 4002
     },
     "desktop/frontend/src/components/ContextPanel.tsx": {
       "file-size": 52
+    },
+    "desktop/frontend/src/components/HistoryPanel.tsx": {
+      "file-size": 7
     },
     "desktop/frontend/src/components/MemoryPanel.tsx": {
       "file-size": 1088
@@ -120,7 +123,7 @@
       "file-size": 141
     },
     "desktop/frontend/src/components/SettingsPanel.tsx": {
-      "file-size": 7235
+      "file-size": 7284
     },
     "desktop/frontend/src/components/StatusBar.tsx": {
       "file-size": 43
@@ -144,7 +147,7 @@
       "file-size": 180
     },
     "desktop/frontend/src/lib/bridge.ts": {
-      "file-size": 4938
+      "file-size": 4944
     },
     "desktop/frontend/src/lib/crash.ts": {
       "file-size": 225
@@ -153,7 +156,7 @@
       "file-size": 264
     },
     "desktop/frontend/src/lib/types.ts": {
-      "file-size": 1559
+      "file-size": 1565
     },
     "desktop/frontend/src/lib/useController.ts": {
       "file-size": 4225
@@ -265,7 +268,7 @@
     "desktop/settings_app.go": {
       "complexity": 29,
       "essay": 6,
-      "file-size": 3035
+      "file-size": 3084
     },
     "desktop/settings_app_test.go": {
       "test-file-size": 1856
@@ -832,7 +835,7 @@
     },
     "internal/config/config.go": {
       "essay": 24,
-      "file-size": 1548,
+      "file-size": 1552,
       "narrative": 2
     },
     "internal/config/credentials.go": {
@@ -897,8 +900,8 @@
     "internal/control/controller.go": {
       "complexity": 11,
       "essay": 91,
-      "file-size": 5490,
-      "function-size": 78,
+      "file-size": 5515,
+      "function-size": 80,
       "narrative": 4,
       "struct-state": 16
     },
@@ -1253,7 +1256,7 @@
     "internal/provider/responses/responses.go": {
       "complexity": 54,
       "essay": 18,
-      "file-size": 96,
+      "file-size": 99,
       "function-size": 181,
       "struct-state": 6
     },

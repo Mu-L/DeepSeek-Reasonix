@@ -5,6 +5,8 @@ import { Pencil, Plus, Plug, RefreshCw, Search, Trash2 } from "lucide-react";
 import type { ProviderModelCapabilityView, ProviderModelOverrideView, ProviderView } from "../lib/types";
 import { applyModelDraft, modelDraftError, type ModelDraft } from "../lib/providerModelDraft";
 import { providerVisionModelsForView } from "../lib/providerVisionCapability";
+import { ModelImageInputControl } from "./ModelImageInputControl";
+import { imageInputModeForModel, imageInputModes, mergeImageInputModes, modelCapabilityForModel, matchingModelKey } from "../lib/providerImageInput";
 import { ProviderDialog } from "./ProviderDialog";
 
 export function ProviderModelsEditor({ provider, disabled, canFetch, onChange, onFetch, onTest, probeKey, draft = false }: {
@@ -32,7 +34,7 @@ export function ProviderModelsEditor({ provider, disabled, canFetch, onChange, o
   const capabilities = provider.modelCapabilities ?? [];
   const vision = providerVisionModelsForView(provider);
   const openEditor = (model?: string) => {
-    const override = overrides.find((item) => item.model === model);
+    const override = overrides.find((item) => item.model === matchingModelKey(overrides.map((item) => item.model), model ?? ""));
     setError(null);
     setEditor({ original: model, value: {
       model: model ?? "", context: override?.contextWindow ? String(override.contextWindow) : "",
@@ -82,7 +84,7 @@ export function ProviderModelsEditor({ provider, disabled, canFetch, onChange, o
     {!provider.models.length && <p className="provider-models-editor__empty">{t("providerUI.emptyModels")}</p>}
     <div className="provider-models-editor__list">
       {provider.models.map((model) => {
-        const override = overrides.find((item) => item.model === model);
+        const override = overrides.find((item) => item.model === matchingModelKey(overrides.map((item) => item.model), model ?? ""));
         const result = tests[model];
         return <div className="provider-model-row" key={model}>
           <div className="provider-model-row__main"><span className="provider-model-row__name">{model}</span>
@@ -92,6 +94,8 @@ export function ProviderModelsEditor({ provider, disabled, canFetch, onChange, o
             <button type="button" className="btn btn--small" aria-label={`${t("providerUI.editModel")} ${model}`} title={t("providerUI.editModel")} disabled={disabled} onClick={() => openEditor(model)}><Pencil size={14} /></button>
             <button type="button" className="btn btn--small" aria-label={`${t("common.delete")} ${model}`} title={t("common.delete")} disabled={disabled} onClick={() => onChange(provider.models.filter((name) => name !== model), overrides.filter((item) => item.model !== model), capabilities.filter((item) => item.model !== model))}><Trash2 size={14} /></button>
           </div>
+          <ModelImageInputControl model={model} baseURL={provider.baseUrl} capability={modelCapabilityForModel(capabilities, model)} mode={imageInputModeForModel(imageInputModes(overrides), model)} disabled={disabled}
+            onChange={(mode) => onChange(provider.models, mergeImageInputModes(overrides, provider.models, { ...imageInputModes(overrides), [model]: mode }), capabilities)} />
           {result && <div role="status" className={`provider-fetch-status provider-fetch-status--${result.error ? "warn" : "ok"}`}>{result.busy ? t("providerUI.testing") : result.error || t("providerUI.testSuccess")}</div>}
         </div>;
       })}
@@ -100,7 +104,9 @@ export function ProviderModelsEditor({ provider, disabled, canFetch, onChange, o
       <form onSubmit={(e) => { e.preventDefault(); saveModel(); }}>
         <label className="provider-field">{t("providerUI.modelID")}<input className="mem-input" value={editor.value.model} onChange={(e) => setEditor({ ...editor, value: { ...editor.value, model: e.target.value } })} /></label>
         <div className="provider-field-grid">{(["context", "output"] as const).map((field) => <label className="provider-field" key={field}>{t(field === "context" ? "providerUI.context" : "providerUI.output")}<input className="mem-input" inputMode="numeric" placeholder={t("providerUI.auto")} value={editor.value[field]} onChange={(e) => setEditor({ ...editor, value: { ...editor.value, [field]: e.target.value } })} /><small>{t(field === "output" ? "providerUI.outputHint" : "providerUI.inherit")}</small></label>)}</div>
-        <label className="provider-field">{t("providerUI.image")}<select className="mem-select" value={editor.value.vision} disabled={provider.visionCapability === "unsupported"} onChange={(e) => setEditor({ ...editor, value: { ...editor.value, vision: e.target.value as ModelDraft["vision"] } })}><option value="auto">{t("providerUI.auto")}</option><option value="yes">{t("providerUI.supported")}</option><option value="no">{t("providerUI.unsupported")}</option></select><small>{t("providerUI.capabilityHint")}</small></label>
+        <ModelImageInputControl model={editor.value.model} baseURL={provider.baseUrl} capability={modelCapabilityForModel(capabilities, editor.value.model)}
+          mode={editor.value.vision === "yes" ? "on" : editor.value.vision === "no" ? "off" : "auto"} disabled={disabled}
+          onChange={(mode) => setEditor({ ...editor, value: { ...editor.value, vision: mode === "on" ? "yes" : mode === "off" ? "no" : "auto" } })} />
         {error && <p role="alert" className="provider-fetch-status provider-fetch-status--warn">{error}</p>}
         <footer><button type="button" className="btn btn--small" onClick={() => { setEditor(null); setError(null); }}>{t("common.cancel")}</button><button type="submit" className="btn btn--primary btn--small" disabled={disabled}>{t(draft ? "providerUI.saveDraft" : "providerUI.applyModel")}</button></footer>
       </form>

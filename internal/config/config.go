@@ -1630,9 +1630,14 @@ func (e *ProviderEntry) modelOverrideForModel(model string) (ProviderModelOverri
 	if ov, ok := e.ModelOverrides[model]; ok {
 		return ov, true
 	}
-	for k, ov := range e.ModelOverrides {
+	keys := make([]string, 0, len(e.ModelOverrides))
+	for k := range e.ModelOverrides {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	for _, k := range keys {
 		if strings.EqualFold(strings.TrimSpace(k), model) {
-			return ov, true
+			return e.ModelOverrides[k], true
 		}
 	}
 	return ProviderModelOverride{}, false
@@ -2137,14 +2142,6 @@ func (e *ProviderEntry) APIKey() string {
 		return ""
 	}
 	return value
-}
-
-// WithAPIKeyForProbe returns a private copy with a draft credential. It neither
-// persists the value nor mutates process environment shared by other requests.
-func (e ProviderEntry) WithAPIKeyForProbe(value string) ProviderEntry {
-	e.resolvedAPIKey = strings.TrimSpace(value)
-	e.resolvedSource = CredentialSource{Kind: CredentialSourceEnvironment, Label: "settings probe"}
-	return e
 }
 
 // ResolveAPIKeyFromProcessEnvForProbe pins a setup-time, user-entered key onto

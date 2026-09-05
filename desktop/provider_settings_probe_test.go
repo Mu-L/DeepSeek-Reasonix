@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"reasonix/internal/config"
@@ -19,6 +20,8 @@ func TestProviderDraftProbesDoNotPersistCredentialsOrConfiguration(t *testing.T)
 	}
 	t.Setenv(keyEnv, "process-key")
 	revision := config.CredentialStoreRevision()
+	cachePath := filepath.Join(config.CacheDir(), "model-capabilities-v2.json")
+	beforeCache, _ := os.ReadFile(cachePath)
 	var paths []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		paths = append(paths, r.URL.Path)
@@ -61,6 +64,10 @@ func TestProviderDraftProbesDoNotPersistCredentialsOrConfiguration(t *testing.T)
 	}
 	if err := a.TestProviderModel(p, "unlisted-model", "draft-key"); err == nil {
 		t.Fatal("unlisted model should be rejected before network access")
+	}
+	afterCache, _ := os.ReadFile(cachePath)
+	if string(beforeCache) != string(afterCache) {
+		t.Fatal("draft credentials polluted the saved capability cache")
 	}
 	if len(paths) != 2 {
 		t.Fatalf("unexpected requests: %v", paths)

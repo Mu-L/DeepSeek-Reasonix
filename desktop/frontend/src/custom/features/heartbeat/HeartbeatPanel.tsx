@@ -2,11 +2,6 @@ import { ManagementPageShell } from "../../../components/ManagementPageShell";
 import { useConfirmDialog } from "../../../components/ConfirmDialog";
 import { useManagementT } from "../../../lib/managementLocale";
 import { useAutomationDraftStore, automationDraftDirty, reconcileAutomationDraft } from "../../../store/automationDrafts";
-// Heartbeat Panel — Modal for configuring scheduled heartbeat tasks.
-//
-// Renders a list of tasks with add/edit/delete controls, plus a manual
-// "run now" button for each. The panel is opened from the sidebar nav item.
-
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Activity,
@@ -449,7 +444,7 @@ export function HeartbeatView({ onOpenTopic, active = true, onBack = () => {} }:
     {loadError && <div className="management-notice" role="alert">{m("loadFailed")}<button className="btn btn--small" onClick={() => void loadTasks()}>{m("retry")}</button></div>}
     {operationError && <div className="management-notice" role="alert">{m("operationFailed")}</div>}
     <div className="heartbeat-page" data-detail={detailOpen}>
-      <div className="heartbeat-split">
+      <div className={`heartbeat-split${detailOpen ? " heartbeat-split--detail-open" : ""}`}>
           {/* ── Left column: task list（含列表区头部工具栏） ── */}
           <div className={`heartbeat-split__left${detailOpen ? "" : " heartbeat-split__left--full"}`} style={{ width: detailOpen ? `${listWidthPct}%` : "100%" }}>
             <div className="heartbeat-toolbar">

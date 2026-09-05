@@ -34,8 +34,10 @@ New copy in `managementLocale.ts` covers Simplified Chinese, Traditional Chinese
 
 ## Verification (2026-09-05)
 
-Deterministic tests cover navigation generations, draft merging/conflicts/deletion, switching tasks during save, failures, keyboard isolation, preview races, recovery-copy exclusion, partial deletion and post-success refresh failure. All 262 frontend suites passed, including heartbeat/history/settings; the separate transcript regression command also passed. Type checking and Hooks/CSS/layer/theme/WAAPI/single-scroll-writer checks run with the production build.
+Deterministic tests cover navigation generations, draft merging/conflicts/deletion, switching tasks during save, failures, keyboard isolation, preview races, recovery-copy exclusion, partial deletion and post-success refresh failure. All 264 frontend suites passed, including heartbeat/history/settings; the separate transcript regression command also passed. Type checking and Hooks/CSS/layer/theme/WAAPI/single-scroll-writer checks run with the production build.
 
 Windows browser preview was exercised at 1280×900 and 800×800, including model settings, trash confirmation/cancellation, and draft/detail retention. No real conversations were purged and no automation task was executed. An isolated macOS native build was checked for page entry, Escape, Command-W return, minimize/restore and window zoom. Windows ARM64 built and launched with isolated data in Win11, displaying onboarding. Native Windows interactions and 100%/125%/150% DPI checks remain unverified; browser preview is not a substitute.
 
-The initial payload measures approximately 465.1 KiB gzip JavaScript and 2477.0 KiB raw JavaScript/CSS. Only those thresholds move to 465.1/2477.1 KiB; feature bodies remain lazy and other budgets remain enforced.
+The initial payload measures approximately 465.3 KiB gzip JavaScript and 2480.3 KiB raw JavaScript/CSS, versus 464.6/2481.1 KiB on the integrated main-v2 base. The gzip ceiling is 465.3 KiB; the upstream raw ceiling remains 2481.2 KiB. The Traditional Chinese chunk rounds up to a 61.7 KiB ceiling. Feature bodies remain lazy and other budgets remain enforced.
+
+The integrated titlebar dispatch was checked in an isolated macOS native build: double-click maximizes and a second double-click restores the original window size. Unsaved credential discovery uses a transient capability resolver and cannot pollute the saved capability cache.

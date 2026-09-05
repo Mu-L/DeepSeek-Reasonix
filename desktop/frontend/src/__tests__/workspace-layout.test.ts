@@ -336,7 +336,7 @@ eq(
   "pointer and keyboard intent prefetch the terminal chunk before opening from the topic bar",
 );
 eq(
-  /useWarmTerminalPanel\(terminalPanelOpen, terminalResizing\)/.test(appSource)
+  /useWarmTerminalPanel\(terminalPanelOpen, terminalResizing, !managementActive\)/.test(appSource)
     && /if \(open\) setMounted\(true\)/.test(terminalLifecycleSource)
     && !/setMounted\(false\)/.test(terminalLifecycleSource),
   true,

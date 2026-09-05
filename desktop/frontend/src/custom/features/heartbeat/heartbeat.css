@@ -26,6 +26,7 @@
   overflow: hidden;
   background: var(--bg);
   position: relative;
+  container: heartbeat-page / inline-size;
 }
 
 /* ── split layout ─────────────────────────────────────────────── */
@@ -290,6 +291,21 @@
   flex-direction: column;
   overflow: hidden;
   background: var(--heartbeat-split-bg);
+}
+
+/* Use the actual task-page width, not the app viewport. At narrow widths the
+   existing editor fills the page without remounting or changing split prefs. */
+@container heartbeat-page (max-width: 559px) {
+  .heartbeat-split--detail-open .heartbeat-split__left,
+  .heartbeat-split--detail-open .heartbeat-split__divider {
+    display: none;
+  }
+
+  .heartbeat-split--detail-open .heartbeat-split__right {
+    flex: 1 1 100%;
+    width: 100%;
+    min-width: 0;
+  }
 }
 
 .heartbeat-split__right .heartbeat-editor {
