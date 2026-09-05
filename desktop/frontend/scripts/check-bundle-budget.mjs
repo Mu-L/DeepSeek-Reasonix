@@ -193,10 +193,10 @@ console.log("\nbundle budgets");
 // The subagent outcome envelope, partial-state card, and history hydration add
 // 0.5 KiB gzip on the initial path. The model-capability resolver and its
 // read-only provider badges add a measured 0.2 KiB including gzip/toolchain
-// rounding. The integrated management shell plus upstream image capability
-// identity measures 465.3 KiB versus 464.6 KiB on the same-toolchain base.
-// Feature editors remain lazy; retain only the next decimal ceiling.
-const initialJSBudgetKiB = 465.3;
+// rounding. The integrated management shell, image capability controls, and
+// upstream updater refresh measure 465.4 KiB gzip (base: 464.7 KiB).
+// Keep the next decimal ceiling and leave feature editors lazy.
+const initialJSBudgetKiB = 465.5;
 assertBudget("initial JavaScript gzip", initialJSGzip, initialJSBudgetKiB * 1024);
 assertBudget("largest initial JavaScript chunk gzip", largestInitialJS, 280 * 1024);
 // Render-blocking CSS is intentionally absent: styles.css loads deferred via
@@ -365,8 +365,7 @@ const rawInitialBytes = [...initialJS, ...initialCSS, ...appShellCSS]
 // On the current main-v2 base, the combined measured path is 2474.6 KiB;
 // the model-capability helper and localized status copy add 0.9 KiB; retain
 // the smallest bounded cross-platform ceiling.
-// The latest base measures 2481.1 KiB; the integrated management pages measure
-// 2480.3 KiB. Retain the upstream ceiling and independent chunk gates.
-const rawInitialBudgetKiB = 2_481.2;
+// Retain the upstream updater ceiling and independent chunk gates.
+const rawInitialBudgetKiB = 2_481.7;
 assertBudget("initial raw JavaScript and CSS", rawInitialBytes, rawInitialBudgetKiB * 1024);
 assertBudget("largest initial JavaScript chunk raw", largestInitialJSRaw, 1_000 * 1024);
