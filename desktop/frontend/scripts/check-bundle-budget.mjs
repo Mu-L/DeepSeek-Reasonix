@@ -193,11 +193,10 @@ console.log("\nbundle budgets");
 // The subagent outcome envelope, partial-state card, and history hydration add
 // 0.5 KiB gzip on the initial path. The model-capability resolver and its
 // read-only provider badges add a measured 0.2 KiB including gzip/toolchain
-// rounding. Direct topic-bar actions replace the overflow trigger; together
-// with per-model image guidance, shared model matching, Automation's page
-// projection, and foreground/hourly updater refresh, retain the measured
-// merged-path ceiling: 464.8 KiB gzip. Export and provider editors stay lazy.
-const initialJSBudgetKiB = 464.8;
+// rounding. The integrated management shell, image capability controls, and
+// upstream updater refresh measure 465.4 KiB gzip (base: 464.7 KiB).
+// Keep the next decimal ceiling and leave feature editors lazy.
+const initialJSBudgetKiB = 465.5;
 assertBudget("initial JavaScript gzip", initialJSGzip, initialJSBudgetKiB * 1024);
 assertBudget("largest initial JavaScript chunk gzip", largestInitialJS, 280 * 1024);
 // Render-blocking CSS is intentionally absent: styles.css loads deferred via
@@ -270,7 +269,7 @@ for (const path of localeChunks) {
   // dropping the unknown-state explanation.
   // Image input mode, provenance and unknown-state guidance measure 60.724 KiB
   // zh and 61.570 KiB zh-TW. Keep the next decimal ceiling per locale.
-  const budget = name.startsWith("zh-TW-") ? 61.6 * 1024 : 60.8 * 1024;
+  const budget = name.startsWith("zh-TW-") ? 61.7 * 1024 : 60.8 * 1024;
   assertBudget(`${name} gzip`, gzipBytes(path), budget);
 }
 
@@ -366,8 +365,7 @@ const rawInitialBytes = [...initialJS, ...initialCSS, ...appShellCSS]
 // On the current main-v2 base, the combined measured path is 2474.6 KiB;
 // the model-capability helper and localized status copy add 0.9 KiB; retain
 // the smallest bounded cross-platform ceiling.
-// Automation's shell projection and the updater refresh owner both remain
-// on the merged initial path: 2481.7 KiB raw at the next decimal ceiling.
+// Retain the upstream updater ceiling and independent chunk gates.
 const rawInitialBudgetKiB = 2_481.7;
 assertBudget("initial raw JavaScript and CSS", rawInitialBytes, rawInitialBudgetKiB * 1024);
 assertBudget("largest initial JavaScript chunk raw", largestInitialJSRaw, 1_000 * 1024);

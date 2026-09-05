@@ -408,7 +408,7 @@ ok(
 
 ok(
   /topicShortcutIndexFromEvent\(event, desktopPlatform\)/.test(appSource) &&
-    /useTopicShortcuts\(!sidebarCollapsed, desktopPlatform\)/.test(appSource),
+    /useTopicShortcuts\(!sidebarCollapsed && !managementActive, desktopPlatform\)/.test(appSource),
   "topic shortcuts use the resolved desktop platform",
 );
 
@@ -566,7 +566,7 @@ ok(
 );
 
 ok(
-  /const enterChatViewForTabNavigation = useCallback\(\(\) => \{\s*setMainView\("chat"\);/.test(appSource) &&
+  /const enterChatViewForTabNavigation = useCallback\(\(\) => \{\s*enterConversation\(\);/.test(appSource) &&
     /const enqueueTabSwitch = useCallback\([\s\S]*?enterChatViewForTabNavigation\(\);[\s\S]*?enqueueNavigationRequest/.test(appSource) &&
     /const revealBackgroundRuntime = useCallback[\s\S]*?enterChatViewForTabNavigation\(\);[\s\S]*?RevealBackgroundRuntime/.test(appSource) &&
     /const revealWorkspaceWriter = useCallback[\s\S]*?enterChatViewForTabNavigation\(\);[\s\S]*?RevealWorkspaceWriterForTab/.test(appSource),
@@ -579,7 +579,7 @@ ok(
 );
 
 ok(
-  /<HeartbeatView[\s\S]*onOpenTopic=\{\(scope, workspaceRoot, topicId\) => \{[\s\S]*void handleOpenTopic\(scope, workspaceRoot, topicId\);[\s\S]*\}\}/.test(appSource),
+  /onOpenTopic: openAutomationTopic/.test(appSource) && /const openAutomationTopic = useCallback[\s\S]*enqueueNavigationWithIntent\(\{ kind: "topic", scope, workspaceRoot, topicId \}, intent\)/.test(appSource),
   "heartbeat topic navigation uses the guarded open-topic path",
 );
 
