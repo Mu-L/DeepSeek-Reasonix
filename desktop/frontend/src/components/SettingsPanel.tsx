@@ -1,12 +1,14 @@
+import { ManagementPageShell } from "./ManagementPageShell";
+import { useProviderT as useT } from "../lib/providerSettingsLocale";
 import { lazy, memo, Suspense, startTransition, useCallback, useDeferredValue, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { ArrowRight, BrainCircuit, Check, CheckCircle2, ChevronDown, ChevronUp, CircleDollarSign, Clipboard, ExternalLink, KeyRound, Languages, ListChecks, Loader2, Monitor, MoreHorizontal, PanelBottom, Play, Power, QrCode, RefreshCw, Send, ShieldCheck, SlidersHorizontal, Trash2, Volume2 } from "lucide-react";
+import { ProviderModelsEditor } from "./ProviderModelsEditor";
 import { asArray } from "../lib/array";
 import { ShellInterpreterFields } from "./SettingsShellSupport";
 import { CHANNEL_ICONS } from "./channelIcons";
 import { botAccessEntryCount, botAccessReady, botConnectionCredentialSummary, botConnectionLabel, botConnectionScopeLabel, botConnectionSecretEnv, botConnectionSecretPatch, botInstallTargetForConnection, botInstallTargetMatchesConnection, botTargetHint, botTargetLabel, diagnosticMessage, diagnosticReportDetail, firstConnectionRemote, formatInstallTimeLeft, formatInstallUserCode, qqBotAdded, type BotInstallTarget, type BotOfficialInstallTarget } from "./botConnectionSettings";
-import { useDeferredClose } from "../lib/useMountTransition";
 import { app, COMPACT_RATIO_MAX_PERCENT, COMPACT_RATIO_MIN_PERCENT, openExternal } from "../lib/bridge";
-import { normalizeLangPref, useI18n, useT, type DictKey, type LangPref } from "../lib/i18n";
+import { normalizeLangPref, useI18n, type DictKey, type LangPref } from "../lib/i18n";
 import { apiKeyEnvFromProviderName, createLatestRequestGate, mergedFetchedProviderModels, mergeProviderModelContextWindows, providerApiKeyEnvForSave, providerDefaultModel, providerIsConfigured, providerModelCandidates, providerModelContextWindowDrafts, providerModelContextWindowIsSmall, providerRequiresKey } from "../lib/providerModels";
 import { cachedFetchProviderModelCatalog, cachedFetchProviderModels, invalidateProviderCacheByAPIKeyEnv, shouldSkipAutoRefresh } from "../lib/providerModelCache";
 import { providerBaseURLForSave, providerRequestURLFromConfig, trimmedBaseURL } from "../lib/providerEndpoint";
@@ -77,7 +79,6 @@ import { getGenerativePreset, setGenerativePreset, generativeMusic, type Generat
 import { SoundSelect } from "./SoundSelect";
 import { getSuccessPreference, setSuccessPreference, getAttentionPreference, setAttentionPreference, getNotificationVolume, setNotificationVolume as persistNotificationVolume, playSuccessChime, playAttentionChime, type SoundWavPref } from "../lib/sound";
 import { NotificationVolumeSlider } from "./NotificationVolumeSlider";
-import { ModalCloseButton } from "./ModalCloseButton";
 import { ShortcutComboDisplay } from "./ShortcutComboDisplay";
 import { SettingsNavigation, SETTINGS_NAV_TABS } from "./SettingsNavigation";
 import { StatusBarItemsEditor } from "./StatusBarItemsEditor";
@@ -99,11 +100,12 @@ const StorageSettingsPage = lazy(() => import("./StorageSettingsPage").then((mod
 const UsageStatsPanel = lazy(() => import("./UsageStatsPanel").then((module) => ({ default: module.UsageStatsPanel })));
 const QRCodeSVG = lazy(() => import("qrcode.react").then((module) => ({ default: module.QRCodeSVG })));
 
-// SettingsPanel is the desktop settings centre: a modal hosting settings pages and capability management.
+// SettingsPanel owns a full-window settings page while the workspace stays mounted.
 export function SettingsPanel({
   onClose,
   onChanged,
   initialTab,
+  onNavigate,
   initialFocus,
   agentRunning = false,
   desktopPlatform,
@@ -113,6 +115,8 @@ export function SettingsPanel({
   onClose: () => void;
   onChanged: (settings?: SettingsView | null) => void;
   initialTab?: SettingsTab;
+  onNavigate?: (tab: SettingsTab) => void;
+  workspaceRef?: { readonly current: HTMLDivElement | null };
   initialFocus?: SettingsInitialFocus;
   agentRunning?: boolean;
   desktopPlatform: DesktopPlatform;
@@ -139,14 +143,12 @@ export function SettingsPanel({
   const [tab, setTab] = useState<SettingsTab>(initialTab === "providers" ? "models" : initialTab ?? "general");
   const settingsContentRef = useRef<HTMLElement>(null);
   const pendingSubagentCommandRef = useRef<string | null>(null);
-  // Play the modal exit animation, then let the parent unmount us and focus
-  // the composer with the selected slash command.
-  const { status, requestClose } = useDeferredClose(() => {
+  const requestClose = useCallback(() => {
     const command = pendingSubagentCommandRef.current;
     pendingSubagentCommandRef.current = null;
     onClose();
     if (command) onUseSubagent(command);
-  }, 240);
+  }, [onClose, onUseSubagent]);
   const zoomSaveSeq = useRef(0);
   const terminalThemeSaveSeq = useRef(0);
   const terminalThemeSavePending = useRef(false);
@@ -172,8 +174,10 @@ export function SettingsPanel({
   }, []);
   useEffect(() => {
     void reload();
+  }, [reload]);
+  useEffect(() => {
     if (initialTab) setTab(initialTab === "providers" ? "models" : initialTab);
-  }, [initialTab, reload]);
+  }, [initialTab]);
   useEffect(() => {
     const content = settingsContentRef.current;
     if (!content) return;
@@ -299,14 +303,7 @@ export function SettingsPanel({
     }
   }, [t]);
 
-  // Close on Esc
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !document.querySelector("[data-anchored-popover='active']")) requestClose();
-    };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [requestClose]);
+  const selectTab = (next: SettingsTab) => { setTab(next); onNavigate?.(next); };
 
   // These pages need SettingsView; capability pages load their own data.
   const needsSettings = tab === "general" || tab === "models" || tab === "bots" || tab === "subagents" || tab === "network" || tab === "permissions" || tab === "sandbox" || tab === "appearance" || tab === "updates";
@@ -323,16 +320,9 @@ export function SettingsPanel({
   })), [s, t]);
 
   return (
-    <div className="management-modal-backdrop settings-modal-backdrop" data-state={status} onMouseDown={(e) => { if (e.target === e.currentTarget) requestClose(); }}>
-      <div className="management-modal settings-modal" data-state={status}>
-        <header className="management-modal__head settings-modal__head">
-          <div className="management-modal__title settings-modal__title">{t("settings.title")}</div>
-          <ModalCloseButton label={t("common.close")} onClick={requestClose} />
-        </header>
-
-        <div className="settings-center">
-          <SettingsNavigation items={settingsNavigationItems} activeTab={tab} onSelect={setTab} />
-          <main ref={settingsContentRef} className="settings-center__content">
+    <ManagementPageShell title={t("settings.title")} className="settings-screen" onBack={requestClose} contentRef={settingsContentRef}
+      navigation={<SettingsNavigation items={settingsNavigationItems} activeTab={tab} onSelect={selectTab} />}>
+      <div className="settings-page-content">
             {needsSettings && settingsLoadFailed && (
               <div className="banner banner--error settings-load-error" role="alert">
                 <span>{t("settings.loadFailed")}</span>
@@ -358,7 +348,7 @@ export function SettingsPanel({
                 {tab === "plugins" && <SettingsPageShell key={tab} s={s} tab={tab} busy={false} apply={apply}><Suspense fallback={lazySettingsPageFallback}><PluginsSettingsPage /></Suspense></SettingsPageShell>}
                 {tab === "memory" && <SettingsPageShell key={tab} s={s} tab={tab} busy={false} apply={apply}><Suspense fallback={lazySettingsPageFallback}><MemorySettingsPage /></Suspense></SettingsPageShell>}
                 {tab === "hooks" && <SettingsPageShell key={tab} s={s} tab={tab} busy={false} apply={apply}><HooksSection onChanged={onChanged} /></SettingsPageShell>}
-                {tab === "diagnostics" && <SettingsPageShell key={tab} s={s} tab={tab} busy={false} apply={apply}><Suspense fallback={lazySettingsPageFallback}><DiagnosticsSettingsPage onNavigate={setTab} /></Suspense></SettingsPageShell>}
+                {tab === "diagnostics" && <SettingsPageShell key={tab} s={s} tab={tab} busy={false} apply={apply}><Suspense fallback={lazySettingsPageFallback}><DiagnosticsSettingsPage onNavigate={selectTab} /></Suspense></SettingsPageShell>}
                 {tab === "shortcuts" && <SettingsPageShell key={tab} s={s} tab={tab} busy={false} apply={apply}><ShortcutsSection /></SettingsPageShell>}
                 {tab === "permissions" && s && <SettingsPageShell key={tab} s={s} tab={tab} busy={busy} apply={apply}><PermissionsSection s={s} busy={busy} apply={apply} /></SettingsPageShell>}
                 {tab === "sandbox" && s && <SettingsPageShell key={tab} s={s} tab={tab} busy={busy} apply={apply}><SandboxSection s={s} busy={busy} apply={apply} windows={desktopPlatform === "windows"} /></SettingsPageShell>}
@@ -437,10 +427,8 @@ export function SettingsPanel({
                 )}
               </>
             )}
-          </main>
-        </div>
       </div>
-    </div>
+    </ManagementPageShell>
   );
 }
 
@@ -1605,6 +1593,8 @@ function providerKindLabel(kind: string, t: ReturnType<typeof useT>): string {
       return t("settings.providerProtocolAnthropic");
     case "openai":
       return t("settings.providerProtocolOpenAI");
+    case "responses":
+      return "OpenAI Responses (/responses)";
     default:
       return kind;
   }
@@ -1642,7 +1632,8 @@ function thinkingModeLabel(mode: string, t: ReturnType<typeof useT>): string {
   }
 }
 function GeneralSection({ s, busy, apply, agentRunning }: SectionProps & { agentRunning: boolean }) {
-  const { t, setPref } = useI18n();
+  const { setPref } = useI18n();
+  const t = useT();
   const closeBehavior = normalizeCloseBehavior(s.closeBehavior);
   const [displayMode, setDisplayMode] = useState<DisplayMode>(() => normalizeDisplayMode(getDisplayMode()));
   const [processFold, setProcessFold] = useState<ProcessFoldPreference>(getProcessFoldPreference);
@@ -4976,6 +4967,9 @@ function ProvidersSection({ s, busy, apply }: SectionProps) {
   const t = useT();
   const [editing, setEditing] = useState<string | null>(null);
   const [adding, setAdding] = useState<AddProviderMode>(null);
+  const [selectedGroup, setSelectedGroup] = useState<string | null>(null);
+  const [showAdd, setShowAdd] = useState(false);
+  const [editorVersions, setEditorVersions] = useState<Record<string, number>>({});
   const [revealedProvider, setRevealedProvider] = useState<string | null>(null);
   const [fetchingProviders, setFetchingProviders] = useState<Set<string>>(() => new Set());
   const fetchGate = useMemo(createLatestRequestGate, []);
@@ -5212,49 +5206,62 @@ function ProvidersSection({ s, busy, apply }: SectionProps) {
       title={t("settings.providerAccess")}
       description={t("settings.providerAccessHint")}
       actions={
-        <button className="btn btn--small" disabled={busy || adding !== null} onClick={() => setAdding("official")}>
+        <button className="btn btn--small" disabled={busy} onClick={() => { setAdding((mode) => mode ?? "official"); setShowAdd(true); }}>
           {t("settings.addProvider")}
         </button>
       }
     >
-      <div className="provider-access-grid">
+      <div className="provider-workspace">
+        <nav className="provider-workspace__rail" aria-label={t("providerUI.providers")}>
+          {[true, false].map((builtIn) => <div key={String(builtIn)}>
+            <h4>{t(builtIn ? "providerUI.builtin" : "providerUI.custom")}</h4>
+            {groups.filter((group) => group.builtIn === builtIn).map((group) => <button type="button" key={group.id} aria-pressed={!showAdd && (groups.some((item) => item.id === selectedGroup) ? selectedGroup : groups[0]?.id) === group.id} onClick={() => { setSelectedGroup(group.id); setShowAdd(false); }}>
+              <span>{group.label}</span><span className={`provider-status-dot${group.configured ? " provider-status-dot--ready" : ""}`} title={providerKeyStatusLabel(group, t)} />
+            </button>)}
+          </div>)}
+          <button type="button" className="provider-workspace__add" aria-pressed={showAdd} onClick={() => { setAdding((mode) => mode ?? "official"); setShowAdd(true); }}>{t("settings.addProvider")}</button>
+        </nav>
+        <div className="provider-workspace__detail">
         {groups.length === 0 && adding === null && (
           <div className="provider-empty">
             <strong>{t("settings.providerAccessEmptyTitle")}</strong>
             <span>{t("settings.providerAccessEmptyHint")}</span>
             <div className="provider-empty__actions">
-              <button type="button" className="btn btn--small" disabled={busy} onClick={() => setAdding("official")}>
+              <button type="button" className="btn btn--small" disabled={busy} onClick={() => { setAdding("official"); setShowAdd(true); }}>
                 {t("settings.addProvider.officialChoice")}
               </button>
-              <button type="button" className="btn btn--small" disabled={busy} onClick={() => setAdding("custom")}>
+              <button type="button" className="btn btn--small" disabled={busy} onClick={() => { setAdding("custom"); setShowAdd(true); }}>
                 {t("settings.addProvider.customChoice")}
               </button>
             </div>
           </div>
         )}
         {adding !== null && (
-          <AddProviderPanel
+          <div hidden={!showAdd}><AddProviderPanel
             mode={adding}
             kinds={s.providerKinds}
             officialProviders={s.officialProviders}
             providerPresets={s.providerPresets}
             busy={busy}
             onMode={setAdding}
-            onCancel={() => setAdding(null)}
-            onAddOfficial={(kind, key) => apply(() => app.AddOfficialProviderAccess(kind, key)).then(() => setAdding(null))}
-            onAddPreset={(id, key) => apply(() => app.AddProviderPresetAccess(id, key)).then(() => setAdding(null))}
+            onCancel={() => { setAdding(null); setShowAdd(false); }}
+            onAddOfficial={(kind, key) => apply(() => app.AddOfficialProviderAccess(kind, key)).then((ok) => { if (ok) { setAdding(null); setShowAdd(false); } })}
+            onAddPreset={(id, key) => apply(() => app.AddProviderPresetAccess(id, key)).then((ok) => { if (ok) { setAdding(null); setShowAdd(false); } })}
             onViewPresetConflict={(providerName) => {
               setRevealedProvider(providerName);
+              setSelectedGroup(providerAccessGroups(s.providers.filter((p) => p.name === providerName), t)[0]?.id ?? null);
+              setShowAdd(false);
               setEditing(providerName);
               setAdding(null);
             }}
-            onResetPreset={(id) => apply(() => app.ResetProviderPresetAccess(id)).then(() => setAdding(null))}
-            onAddCustom={(pv, key) => apply(() => saveProvider(pv, key ?? "")).then(() => setAdding(null))}
-          />
+            onResetPreset={(id) => apply(() => app.ResetProviderPresetAccess(id)).then((ok) => { if (ok) { setAdding(null); setShowAdd(false); } })}
+            onAddCustom={(pv, key) => apply(() => saveProvider(pv, key ?? "")).then((ok) => { if (!ok) throw new Error(t("providerUI.saveFailed")); setAdding(null); setShowAdd(false); setSelectedGroup(`custom:${pv.name}`); })}
+          /></div>
         )}
-        {adding === null && groups.map((group) => (
-          <ProviderAccessCard
-            key={group.id}
+        {groups.map((group) => (
+          <div key={group.id} hidden={showAdd || (groups.some((item) => item.id === selectedGroup) ? selectedGroup : groups[0]?.id) !== group.id}><ProviderAccessCard
+            key={`${group.id}:${editorVersions[group.id] ?? 0}`}
+            detailMode
             group={group}
             busy={busy}
             fetching={fetchingProviders.has(group.id)}
@@ -5263,12 +5270,14 @@ function ProvidersSection({ s, busy, apply }: SectionProps) {
             editing={editing}
             kinds={s.providerKinds}
             onEdit={setEditing}
-            onCancelEdit={() => setEditing(null)}
+            onCancelEdit={() => { setEditing(null); setEditorVersions((prev) => ({ ...prev, [group.id]: (prev[group.id] ?? 0) + 1 })); }}
             onSave={(pv, key) => {
               cancelGroupFetch(group.id);
-              return apply(() => saveProvider(pv, key ?? "")).then(() => {
+              return apply(() => saveProvider(pv, key ?? "")).then((ok) => {
+                if (!ok) throw new Error(t("providerUI.saveFailed"));
                 setEditing(null);
                 setGroupModelDraft(group.id, null);
+                setEditorVersions((prev) => ({ ...prev, [group.id]: (prev[group.id] ?? 0) + 1 }));
               });
             }}
             onRefresh={(provider) => void refreshModels(group, provider)}
@@ -5321,8 +5330,9 @@ function ProvidersSection({ s, busy, apply }: SectionProps) {
                 }
               });
             }}
-          />
+          /></div>
         ))}
+        </div>
       </div>
     </SettingsSection>
   );
@@ -5627,7 +5637,8 @@ export function AddProviderPanel({
     ?? "";
   const [templateID, setTemplateID] = useState(() => firstAvailableTemplateID);
   const [key, setKey] = useState("");
-  const [showProviderCatalog, setShowProviderCatalog] = useState(false);
+  const [catalogOpen, setCatalogOpen] = useState(false);
+  const [catalogQuery, setCatalogQuery] = useState("");
   const selected = visibleTemplateChoices.find((choice) => choice.id === templateID)
     ?? visibleTemplateChoices.find((choice) => choice.id === firstAvailableTemplateID)
     ?? visibleTemplateChoices[0];
@@ -5684,7 +5695,7 @@ export function AddProviderPanel({
         disabled={busy || !canAdd}
         onClick={() => {
           setTemplateID(choice.id);
-          if (isFeaturedProviderChoice(choice)) setShowProviderCatalog(false);
+          setCatalogOpen(false);
         }}
       >
         <strong>
@@ -5699,7 +5710,7 @@ export function AddProviderPanel({
 
   const featuredProviderChoices = visibleTemplateChoices.filter(isFeaturedProviderChoice);
   const otherChoices = visibleTemplateChoices.filter((choice) => !isFeaturedProviderChoice(choice));
-  const focusedFeaturedProvider = selected && isFeaturedProviderChoice(selected) && !showProviderCatalog ? selected : null;
+
 
   const header = (
     <div className="provider-add-panel__head">
@@ -5737,135 +5748,31 @@ export function AddProviderPanel({
     </div>
   );
 
-  if (mode === "official") {
-    if (focusedFeaturedProvider) {
-      const canConnect = providerTemplateCanAdd(focusedFeaturedProvider)
-        && (focusedFeaturedProvider.keySet || key.trim().length > 0);
-      const setupHint = focusedFeaturedProvider.source === "official"
-        ? t("settings.addProvider.official.deepseekDesc")
-        : focusedFeaturedProvider.presetID === "opencode-go-recommended"
-          ? t("settings.addProvider.openCodeGoQuickSetupHint")
-          : t("settings.addProvider.zenCredentialHint");
-      const connect = () => {
-        if (focusedFeaturedProvider.source === "official") {
-          void onAddOfficial(focusedFeaturedProvider.kind, key.trim());
-        } else {
-          void onAddPreset(focusedFeaturedProvider.presetID, key.trim());
-        }
-      };
-      return (
-        <div className="provider-add-panel">
-          {header}
-          <section className="provider-quick-setup" aria-labelledby="provider-quick-setup-title">
-            <div className="provider-featured-picker">
-              <span className="provider-featured-picker__label">{t("settings.addProvider.featuredProviders")}</span>
-              <div className="provider-featured-grid">
-                {featuredProviderChoices.map(renderTemplateChoice)}
-              </div>
-            </div>
-            <div className="provider-quick-setup__intro">
-              <strong id="provider-quick-setup-title">{focusedFeaturedProvider.label}</strong>
-              <span>{setupHint}</span>
-            </div>
-            <label className="set-label" htmlFor="provider-quick-setup-key">API Key</label>
-            <input
-              id="provider-quick-setup-key"
-              className="mem-input provider-quick-setup__key"
-              type="password"
-              autoFocus
-              placeholder={t("settings.setKey", { env: focusedFeaturedProvider.keyEnv })}
-              value={key}
-              disabled={busy || !providerTemplateCanAdd(focusedFeaturedProvider)}
-              onChange={(event) => setKey(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" && canConnect) {
-                  connect();
-                }
-              }}
-            />
-            <div className="provider-quick-setup__actions">
-              <button type="button" className="btn btn--small" disabled={busy} onClick={() => setShowProviderCatalog(true)}>
-                {t("settings.addProvider.chooseAnotherProvider")}
-              </button>
-              <button
-                type="button"
-                className="btn btn--primary btn--small"
-                disabled={busy || !canConnect}
-                onClick={connect}
-              >
-                {t("settings.addProvider.connectAndStart")}
-              </button>
-            </div>
-          </section>
-        </div>
-      );
-    }
-    return (
-      <div className="provider-add-panel">
-        {header}
-        {modeSwitch}
-        <div className="provider-add-panel__hint">{t("settings.addProvider.officialHint")}</div>
-        {featuredProviderChoices.length > 0 ? (
-          <div className="provider-preset-group">
-            <h4>{t("settings.addProvider.featuredProviders")}</h4>
-            <div className="provider-featured-grid">{featuredProviderChoices.map(renderTemplateChoice)}</div>
-          </div>
-        ) : null}
-        {otherChoices.length > 0 ? (
-          <div className="provider-preset-group">
-            <h4>{t("settings.addProvider.otherProviders")}</h4>
-            <div className="provider-template-grid">{otherChoices.map(renderTemplateChoice)}</div>
-          </div>
-        ) : null}
-        <label className="set-label">{t("settings.providerKeyOptional")}</label>
-        <input
-          className="mem-input"
-          type="password"
-          placeholder={selected ? t("settings.setKey", { env: selected.keyEnv }) : ""}
-          value={key}
-          disabled={busy || !providerTemplateCanAdd(selected)}
-          onChange={(e) => setKey(e.target.value)}
-        />
-        <div className="prov-card__actions">
-          <button type="button" className="btn btn--small" disabled={busy} onClick={onCancel}>
-            {t("common.cancel")}
-          </button>
-          <button
-            type="button"
-            className="btn btn--primary btn--small"
-            disabled={busy || !providerTemplateCanAdd(selected)}
-            onClick={() => {
-              if (!providerTemplateCanAdd(selected)) return;
-              if (selected.source === "official") void onAddOfficial(selected.kind, key.trim());
-              else void onAddPreset(selected.presetID, key.trim());
-            }}
-          >
-            {providerTemplateActionLabel(selected, t)}
-          </button>
-        </div>
-      </div>
-    );
-  }
-
-  if (mode === "custom") {
-    return (
-      <div className="provider-add-panel">
-        {header}
-        {modeSwitch}
-        <div className="provider-add-panel__hint">{t("settings.addProvider.customHint")}</div>
-        <ProviderEditor
-          kinds={kinds}
-          busy={busy}
-          onCancel={onCancel}
-          onSave={onAddCustom}
-        />
-      </div>
-    );
-  }
-  return null;
+  return <div className="provider-add-panel">
+    {header}{modeSwitch}
+    <div hidden={mode !== "official"}>
+      <label className="set-label">{t("providerUI.chooseProvider")}</label>
+      <button type="button" className="btn provider-catalog-trigger" aria-expanded={catalogOpen} onClick={() => setCatalogOpen((value) => !value)}>{selected?.label ?? t("providerUI.chooseProvider")}<ChevronDown size={16} /></button>
+      {catalogOpen && <div className="provider-catalog">
+        <input className="mem-input" aria-label={t("providerUI.searchProviders")} placeholder={t("providerUI.searchProviders")} value={catalogQuery} onChange={(e) => setCatalogQuery(e.target.value)} />
+        <div className="provider-catalog__list">{[...featuredProviderChoices, ...otherChoices].filter((choice) => `${choice.label} ${choice.description}`.toLowerCase().includes(catalogQuery.trim().toLowerCase())).map(renderTemplateChoice)}</div>
+      </div>}
+      <p className="mem-hint">{selected?.description}</p>
+      <label className="set-label">{t("settings.providerKeyOptional")}</label>
+      <input className="mem-input" type="password" autoComplete="off" value={key} placeholder={t("settings.providerKeyPlaceholder")} disabled={busy} onChange={(e) => setKey(e.target.value)} />
+      <p className="mem-hint">{t("providerUI.presetHint")}</p>
+      <div className="prov-card__actions"><button type="button" className="btn btn--primary btn--small" disabled={busy || !providerTemplateCanAdd(selected)} onClick={() => {
+        if (!selected || !providerTemplateCanAdd(selected)) return;
+        if (selected.source === "official") void onAddOfficial(selected.kind, key.trim());
+        else void onAddPreset(selected.presetID, key.trim());
+      }}>{providerTemplateActionLabel(selected, t)}</button></div>
+    </div>
+    <div hidden={mode !== "custom"}><ProviderEditor kinds={kinds} busy={busy} onCancel={onCancel} onSave={onAddCustom} /></div>
+  </div>;
 }
 
 export function ProviderAccessCard({
+  detailMode = false,
   group,
   busy,
   fetching,
@@ -5888,6 +5795,7 @@ export function ProviderAccessCard({
   onClearEditorKey,
   onDelete,
 }: {
+  detailMode?: boolean;
   group: ProviderAccessGroup;
   busy: boolean;
   fetching: boolean;
@@ -5913,7 +5821,7 @@ export function ProviderAccessCard({
   const t = useT();
   const editableProvider = group.providers[0];
   const isOpenCodeGoConnection = group.id === "custom:opencode-go";
-  const editingProvider = group.providers.find((p) => editing === p.name);
+  const editingProvider = group.providers.find((p) => editing === p.name) ?? (detailMode && group.providers.length === 1 ? editableProvider : undefined);
   const upgradeProvider = group.providers.find((p) => p.recommendedUpgradeAvailable);
   const primaryProviderExpanded = Boolean(editableProvider && editing === editableProvider.name);
   const supportsServerWebSearch = isOpenCodeGoConnection
@@ -5952,7 +5860,7 @@ export function ProviderAccessCard({
     </div>
   );
   return (
-    <article className={`provider-access-card${group.builtIn ? " provider-access-card--builtin" : ""}`}>
+    <article className={`provider-access-card${detailMode ? " provider-access-card--detail" : ""}${group.builtIn ? " provider-access-card--builtin" : ""}`}>
       <div className="provider-access-card__head">
         <div className="provider-access-card__identity">
           <div className="provider-access-card__title">
@@ -5966,7 +5874,7 @@ export function ProviderAccessCard({
           </div>
         </div>
         <div className="provider-access-card__actions">
-          {editableProvider && !isOpenCodeGoConnection && (
+          {editableProvider && !isOpenCodeGoConnection && !detailMode && (
             <button
               className="btn btn--small"
               disabled={busy}
@@ -5976,7 +5884,7 @@ export function ProviderAccessCard({
               {primaryProviderExpanded ? t("common.collapse") : t("settings.configureProvider")}
             </button>
           )}
-          {editableProvider && group.providers.length === 1 && (
+          {editableProvider && group.providers.length === 1 && !detailMode && (
             <button
               className="btn btn--small"
               disabled={busy || fetching || !editableProvider.baseUrl || !group.configured}
@@ -6017,7 +5925,7 @@ export function ProviderAccessCard({
         </div>
       )}
 
-      {!supportsServerWebSearch && (
+      {!supportsServerWebSearch && !detailMode && (
         <ProviderModelSummary
           configured={group.configured}
           models={visibleModels}
@@ -6062,7 +5970,7 @@ export function ProviderAccessCard({
         />
       )}
 
-      <ProviderTechnicalDetails group={group} />
+      {!detailMode && <ProviderTechnicalDetails group={group} />}
 
       {group.providers.length > 1 && (isOpenCodeGoConnection ? (
         <details className="provider-route-settings">
@@ -6723,7 +6631,6 @@ export function ProviderEditor({
   busy,
   onCancel,
   onSave,
-  onSaveKey,
   onClearKey,
 }: {
   initial?: ProviderView;
@@ -6737,23 +6644,16 @@ export function ProviderEditor({
   const t = useT();
   const [name, setName] = useState(initial?.name ?? "");
   const [kind, setKind] = useState(initial?.kind ?? "openai");
-  const [requestUrl, setRequestUrl] = useState(() => providerRequestURLFromConfig(
-    initial?.kind ?? "openai",
-    initial?.baseUrl ?? "",
-    initial?.requestUrl ?? "",
-    initial?.chatUrl ?? "",
-  ));
+  const [baseUrlDraft, setBaseUrlDraft] = useState(initial?.baseUrl ?? "");
+  const [requestUrl, setRequestUrl] = useState(initial?.requestUrl?.trim() || (initial?.chatUrl ? providerRequestURLFromConfig(initial.kind, initial.baseUrl, "", initial.chatUrl) : ""));
   const providerNameInputId = useId();
   const providerNameHelpId = useId();
   const providerUrlInputId = useId();
   const providerUrlHelpId = useId();
   const [models, setModels] = useState((initial?.models ?? []).join(", "));
-  const [modelCandidates, setModelCandidates] = useState<string[]>(initial?.models ?? []);
   const [legacyVisionModels] = useState(initial?.visionModels ?? []);
+  const [modelOverrides, setModelOverrides] = useState(initial?.modelOverrides ?? []);
   const [modelCapabilities, setModelCapabilities] = useState<ProviderModelCapabilityView[]>(initial?.modelCapabilities ?? []);
-  const [visionModels, setVisionModels] = useState(() => providerVisionModelsForView(
-    initial ?? { models: [], visionModels: [], modelOverrides: [] },
-  ).join(", "));
   const visionModelsConfigured = Boolean(initial?.visionModelsConfigured ?? legacyVisionModels.length > 0);
   const [modelsUrl, setModelsUrl] = useState(initial?.modelsUrl ?? "");
   const [apiKeyEnv, setApiKeyEnv] = useState(initial?.apiKeyEnv ?? "");
@@ -6774,8 +6674,6 @@ export function ProviderEditor({
   const [webSearch, setWebSearch] = useState(Boolean(initial?.webSearch));
   const [supportedEfforts] = useState<string[]>(initial?.supportedEfforts ?? []);
   const [defaultEffort] = useState(initial?.defaultEffort ?? "");
-  const [fetchingModels, setFetchingModels] = useState(false);
-  const [fetchStatus, setFetchStatus] = useState<string | null>(null);
   const [fetchFallback, setFetchFallback] = useState<string | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const builtIn = initial?.builtIn ?? false;
@@ -6785,8 +6683,8 @@ export function ProviderEditor({
     return choices.length > 0 ? choices : ["openai"];
   }, [kind, kinds]);
   const effectiveKind = providerEditorEffectiveKind(isNewCustomProvider, kind, providerKindChoices);
-  const effectiveRequestUrl = requestUrl.trim();
-  const effectiveBaseUrl = providerBaseURLForSave(initial, effectiveKind, effectiveRequestUrl);
+  const effectiveRequestUrl = requestUrl.trim() || providerRequestURLFromConfig(effectiveKind, baseUrlDraft, "", "");
+  const effectiveBaseUrl = requestUrl.trim() ? providerBaseURLForSave(initial, effectiveKind, effectiveRequestUrl) : trimmedBaseURL(baseUrlDraft);
   const effectiveLegacyChatUrl = effectiveKind.toLowerCase() === "openai" ? effectiveRequestUrl : initial?.chatUrl ?? "";
   const effectiveModelsUrl = modelsUrl.trim();
   const initialEffectiveBaseUrl = initial ? trimmedBaseURL(initial.baseUrl) : "";
@@ -6811,14 +6709,6 @@ export function ProviderEditor({
     () => parseProviderListInput(models),
     [models],
   );
-  const modelCandidateNames = useMemo(
-    () => uniqueStrings([...modelCandidates, ...modelNames]),
-    [modelCandidates, modelNames],
-  );
-  const visionModelNames = useMemo(
-    () => parseProviderListInput(visionModels).filter((model) => modelNames.includes(model)),
-    [modelNames, visionModels],
-  );
 
   // Empty supportedEfforts means "use protocol defaults". The simplified
   // provider flow no longer edits these levels directly, but it preserves
@@ -6833,70 +6723,8 @@ export function ProviderEditor({
   const normalizedDefaultEffort = defaultEffort.toLowerCase().trim();
   const cleanDefaultEffort = cleanedSupportedEfforts.includes(normalizedDefaultEffort) ? normalizedDefaultEffort : "";
 
-  const fetchModels = async () => {
-    if (extraBodyInvalid) return;
-    setFetchingModels(true);
-    setFetchStatus(null);
-    setFetchFallback(null);
-    try {
-      const effectiveApiKeyEnv = providerApiKeyEnvForSave(name, apiKeyEnv, keyDraft);
-      if (!apiKeyEnv.trim()) setApiKeyEnv(effectiveApiKeyEnv);
-      if (keyDraft.trim()) {
-        await app.SaveProviderKey(effectiveApiKeyEnv, keyDraft.trim());
-        invalidateProviderCacheByAPIKeyEnv(effectiveApiKeyEnv);
-      }
-      const fetchedCapabilities = await cachedFetchProviderModelCatalog((provider) => app.FetchProviderModelCatalog(provider), {
-        name: name.trim() || t("settings.newProviderDraftName"),
-        builtIn: initial?.builtIn ?? false,
-        added: initial?.added ?? true,
-        kind: effectiveKind,
-        baseUrl: effectiveBaseUrl,
-        chatUrl: effectiveLegacyChatUrl,
-        requestUrl: effectiveRequestUrl,
-        modelsUrl: effectiveModelsUrl,
-        models: [],
-        visionModels: [],
-        visionModelsConfigured: false,
-        default: "",
-        apiKeyEnv: effectiveApiKeyEnv,
-        headers: effectiveHeaders,
-        extraBody: effectiveExtraBody,
-        authHeader,
-        noProxy,
-        keySet: Boolean(keyDraft.trim()) || (initial?.keySet ?? false),
-        balanceUrl: balanceUrl.trim(),
-        contextWindow: Number(ctx) || 0,
-        reasoningProtocol,
-        thinking,
-        webSearch: effectiveServerWebSearchCapability && webSearch,
-        serverWebSearchCapability: effectiveServerWebSearchCapability,
-        supportedEfforts: cleanedSupportedEfforts,
-        defaultEffort: cleanDefaultEffort,
-        modelOverrides: mergeProviderModelContextWindows(initial?.modelOverrides, parseProviderListInput(models), modelContextWindows),
-      }, true);
-      const fetched = fetchedCapabilities.map((item) => item.model);
-      if (fetched.length === 0) {
-        setFetchFallback(t("settings.fetchModelsManualFallbackEmpty"));
-        return;
-      }
-      setModelCandidates(fetched);
-      setModelCapabilities(fetchedCapabilities);
-      setModels(fetched.join(", "));
-      setVisionModels((current) => {
-        return parseProviderListInput(current).filter((model) => fetched.includes(model)).join(", ");
-      });
-      if (keyDraft.trim()) setKeyDraft("");
-      setFetchStatus(t("settings.fetchModelsSuccess", { n: fetched.length }));
-    } catch (e) {
-      setFetchFallback(providerModelFetchFallbackMessage(e, t));
-    } finally {
-      setFetchingModels(false);
-    }
-  };
-
   const save = async () => {
     if (extraBodyInvalid) return;
-    setFetchStatus(null);
     setFetchFallback(null);
     const ms = parseProviderListInput(models);
     const vms = legacyVisionModels.filter((model) => ms.includes(model));
@@ -6912,7 +6740,7 @@ export function ProviderEditor({
       models: ms,
       visionModels: vms,
       visionModelsConfigured,
-      default: ms[0] ?? "",
+      default: providerDefaultModel(initial?.default ?? "", ms),
       apiKeyEnv: effectiveApiKeyEnv,
       headers: effectiveHeaders,
       extraBody: effectiveExtraBody,
@@ -6930,7 +6758,7 @@ export function ProviderEditor({
       // Clear the stored default if no levels are selected; the backend's
       // NormalizeEffort would otherwise silently ignore an unsupported value.
       defaultEffort: cleanedSupportedEfforts.length > 0 ? cleanDefaultEffort : "",
-      modelOverrides: mergeProviderModelContextWindows(initial?.modelOverrides, ms, modelContextWindows),
+      modelOverrides: mergeProviderModelContextWindows(modelOverrides, ms, modelContextWindows),
       modelCapabilities,
     };
     try {
@@ -6940,73 +6768,18 @@ export function ProviderEditor({
     }
   };
 
-  if (builtIn) {
-    const keyEnv = initial?.apiKeyEnv.trim() ?? "";
-    return (
-      <div className="provider-editor provider-editor--builtin provider-editor--key-only">
-        {initial && onSaveKey && keyEnv && (
-          <>
-            <div className="provider-key-status provider-key-status--managed provider-key-status--compact">
-              <span title={initial.keySourcePath || undefined}>
-                {initial.keySet ? t("settings.configuredKey", { env: keyEnv }) : t("settings.notConfiguredKey", { env: keyEnv })}
-                {initial.keySource ? ` · ${t("settings.keySource", { source: initial.keySource })}` : ""}
-              </span>
-              {initial.keySet && onClearKey && (
-                <InlineConfirmButton
-                  label={t("settings.clearKey")}
-                  confirmLabel={t("settings.confirmClearKey")}
-                  cancelLabel={t("common.cancel")}
-                  disabled={busy}
-                  danger
-                  onConfirm={() => onClearKey(keyEnv)}
-                />
-              )}
-            </div>
-            <KeyField
-              apiKeyEnv={keyEnv}
-              busy={busy}
-              keySet={initial.keySet}
-              onSet={(env, value) => onSaveKey(env, value)}
-            />
-          </>
-        )}
-      </div>
-    );
-  }
-
-  const canFetch = Boolean(name.trim() && effectiveBaseUrl);
-
-  const setModelsFromList = (nextModels: string[]) => {
-    setModels(uniqueStrings(nextModels).join(", "));
+  const canFetch = Boolean(name.trim() && effectiveBaseUrl && !extraBodyInvalid);
+  const modelProvider: ProviderView = {
+    ...initial, name: name.trim(), kind: effectiveKind, baseUrl: effectiveBaseUrl,
+    requestUrl: effectiveRequestUrl, chatUrl: effectiveLegacyChatUrl, modelsUrl: effectiveModelsUrl,
+    models: modelNames, modelOverrides: mergeProviderModelContextWindows(modelOverrides, modelNames, modelContextWindows),
+    modelCapabilities, visionModels: legacyVisionModels, visionModelsConfigured,
+    apiKeyEnv: providerApiKeyEnvForSave(name, apiKeyEnv, keyDraft), headers: effectiveHeaders, extraBody: effectiveExtraBody,
+    authHeader, noProxy, builtIn, added: true, keySet: Boolean(keyDraft.trim()) || Boolean(initial?.keySet),
+    default: providerDefaultModel(initial?.default ?? "", modelNames), balanceUrl: balanceUrl.trim(),
+    contextWindow: Number(ctx) || 0, reasoningProtocol, thinking, supportedEfforts: cleanedSupportedEfforts,
+    defaultEffort: cleanDefaultEffort, webSearch,
   };
-
-  const updateManualModels = (value: string) => {
-    setModels(value);
-    const typedModels = parseProviderListInput(value);
-    if (typedModels.length > 0) {
-      setModelCandidates((current) => uniqueStrings([...current, ...typedModels]));
-    }
-  };
-
-  const toggleEditorModel = (model: string) => {
-    const selected = new Set(modelNames);
-    if (selected.has(model)) selected.delete(model);
-    else selected.add(model);
-    setModelsFromList(modelCandidateNames.filter((candidate) => selected.has(candidate)));
-  };
-
-  const updateEditorModelContextWindow = (model: string, value: string) => {
-    setModelContextWindows((current) => ({ ...current, [model]: value }));
-  };
-
-  const selectAllEditorModels = () => {
-    setModelsFromList(modelCandidateNames);
-  };
-
-  const clearEditorModels = () => {
-    setModels("");
-  };
-
   const advancedFields = (
     <details className="provider-editor-advanced" open={advancedOpen} onToggle={(e) => setAdvancedOpen(e.currentTarget.open)}>
       <summary>
@@ -7019,6 +6792,7 @@ export function ProviderEditor({
         </span>
       </summary>
       <div className="provider-editor-advanced__body">
+        <label className="provider-field">{t("providerUI.exactURL")}<input className="mem-input" placeholder={effectiveRequestUrl} value={requestUrl} disabled={builtIn || busy} onChange={(e) => setRequestUrl(e.target.value)} /><small>{t("providerUI.exactURLHint")}</small></label>
         <label className="set-label">{t("settings.providerApiKeyEnv")}</label>
         <input
           className="mem-input"
@@ -7132,7 +6906,7 @@ export function ProviderEditor({
         </div>
       )}
       <label className="set-label">{t("settings.providerProtocol")}</label>
-      <select className="mem-select" value={kind} onChange={(e) => setKind(e.target.value)}>
+      <select className="mem-select" value={kind} disabled={builtIn || busy} onChange={(e) => setKind(e.target.value)}>
         {providerKindChoices.map((choice) => (
           <option key={choice} value={choice}>
             {providerKindLabel(choice, t)}
@@ -7141,84 +6915,41 @@ export function ProviderEditor({
       </select>
       <div className="mem-hint">{providerKindHint(effectiveKind, t)}</div>
       <label className="set-label" htmlFor={providerUrlInputId}>
-        {t("settings.providerBaseUrlLabel")}
+        {t("providerUI.baseURL")}
       </label>
       <input
         id={providerUrlInputId}
         className="mem-input provider-url-input"
         aria-describedby={providerUrlHelpId}
-        placeholder={t("settings.providerChatUrlPlaceholder")}
-        value={requestUrl}
-        onChange={(e) => setRequestUrl(e.target.value)}
+        placeholder="https://api.example.com/v1"
+        value={baseUrlDraft}
+        disabled={builtIn || busy}
+        onChange={(e) => setBaseUrlDraft(e.target.value)}
       />
       <div id={providerUrlHelpId} className="mem-hint">
-        {t("settings.providerRequestUrlHint")}
+        {t("providerUI.finalURL")} <code>{effectiveRequestUrl || "—"}</code>
       </div>
-      {!initial && (
-        <>
-          <label className="set-label">{t("settings.providerKey")}</label>
-          <input
-            className="mem-input"
-            type="password"
-            placeholder={t("settings.providerKeyPlaceholder")}
-            value={keyDraft}
-            onChange={(e) => setKeyDraft(e.target.value)}
-          />
-        </>
-      )}
-      {initial && onSaveKey && apiKeyEnv.trim() && (
-        <>
-          <label className="set-label">{t("settings.providerKey")}</label>
-          {initial.keySource && (
-            <div className="mem-hint" title={initial.keySourcePath || undefined}>
-              {t("settings.keySource", { source: initial.keySource })}
-            </div>
-          )}
-          <KeyField
-            apiKeyEnv={apiKeyEnv.trim()}
-            busy={busy || fetchingModels}
-            keySet={initial.keySet}
-            onSet={(env, value) => onSaveKey(env, value)}
-          />
-        </>
-      )}
-      <div className="provider-model-fetch-row">
-        <button
-          type="button"
-          className="btn btn--small"
-          disabled={busy || fetchingModels || !canFetch || extraBodyInvalid}
-          onClick={() => void fetchModels()}
-        >
-          {fetchingModels ? t("settings.fetchingModels") : t("settings.testFetchModels")}
-        </button>
-        <span>{t("settings.testFetchModelsHint")}</span>
-      </div>
-      {fetchStatus && <div className="provider-fetch-status provider-fetch-status--ok">{fetchStatus}</div>}
-      {fetchFallback && <div className="provider-fetch-status provider-fetch-status--warn">{fetchFallback}</div>}
-      <label className="set-label">{t("settings.manualModels")}</label>
-      <input className="mem-input" placeholder={t("settings.providerModels")} value={models} onChange={(e) => updateManualModels(e.target.value)} />
-      <div className="mem-hint">{t("settings.manualModelsHint")}</div>
-      <ProviderEditorModelPicker
-        candidates={modelCandidateNames}
-        selectedModels={modelNames}
-        visionModels={visionModelNames}
-        visionModelsConfigured={visionModelsConfigured} visionCapability={initial?.visionCapability}
-        modelCapabilities={modelCapabilities}
-        contextWindows={modelContextWindows}
-        disabled={busy || fetchingModels}
-        onToggleModel={toggleEditorModel}
-        onContextWindowChange={updateEditorModelContextWindow}
-        onSelectAll={selectAllEditorModels}
-        onClear={clearEditorModels}
+      <label className="set-label">{t("settings.providerKey")}</label>
+      <input className="mem-input" type="password" autoComplete="off" placeholder={t(initial?.keySet ? "providerUI.keySet" : "settings.providerKeyPlaceholder")} value={keyDraft} disabled={busy} onChange={(e) => setKeyDraft(e.target.value)} />
+      {initial?.keySet && onClearKey && <InlineConfirmButton label={t("settings.clearKey")} confirmLabel={t("settings.confirmClearKey")} cancelLabel={t("common.cancel")} disabled={busy} danger onConfirm={() => onClearKey(apiKeyEnv)} />}
+      {fetchFallback && <p role="alert" className="provider-fetch-status provider-fetch-status--warn">{fetchFallback}</p>}
+      <ProviderModelsEditor provider={modelProvider} draft={!initial} disabled={busy} canFetch={canFetch} probeKey={keyDraft}
+        onChange={(nextModels, nextOverrides, nextCapabilities) => {
+          setModels(nextModels.join(", ")); setModelOverrides(nextOverrides); setModelCapabilities(nextCapabilities);
+          setModelContextWindows(providerModelContextWindowDrafts(nextOverrides));
+        }}
+        onFetch={async () => { try { return await app.FetchProviderModelCatalogDraft(modelProvider, keyDraft.trim()); } catch (error) { throw new Error(providerModelFetchFallbackMessage(error, t)); } }}
+        onTest={(model) => app.TestProviderModel(modelProvider, model, keyDraft.trim())}
       />
       <ProviderServiceCapabilities
         supported={effectiveServerWebSearchCapability}
         models={modelNames}
         enabled={webSearch}
-        disabled={busy || fetchingModels}
+        disabled={busy}
         onChange={setWebSearch}
       />
       {advancedFields}
+      <p className="mem-hint">{t("providerUI.draftHint")}</p>
       <div className="prov-card__actions">
         <button className="btn btn--small" onClick={onCancel} disabled={busy}>
           {t("common.cancel")}
@@ -7227,43 +6958,6 @@ export function ProviderEditor({
           {t("common.save")}
         </button>
       </div>
-    </div>
-  );
-}
-
-function KeyField({
-  apiKeyEnv,
-  busy,
-  keySet = false,
-  onSet,
-}: {
-  apiKeyEnv: string;
-  busy: boolean;
-  keySet?: boolean;
-  onSet: (apiKeyEnv: string, value: string) => Promise<void>;
-}) {
-  const t = useT();
-  const [val, setVal] = useState("");
-  if (!apiKeyEnv) return null;
-  return (
-    <div className="set-key">
-      <input
-        className="mem-input"
-        type="password"
-        placeholder={t(keySet ? "settings.updateKey" : "settings.setKey", { env: apiKeyEnv })}
-        value={val}
-        onChange={(e) => setVal(e.target.value)}
-      />
-      <button
-        className="btn btn--small"
-        disabled={busy || !val.trim()}
-        onClick={() => {
-          void onSet(apiKeyEnv, val.trim());
-          setVal("");
-        }}
-      >
-        {t(keySet ? "settings.updateKeyAction" : "settings.saveKey")}
-      </button>
     </div>
   );
 }

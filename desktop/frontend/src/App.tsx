@@ -1,3 +1,6 @@
+import { ManagementSurface } from "./components/ManagementSurface";
+import { useManagementWorkspace } from "./lib/useManagementWorkspace";
+import { useAppNavigationStore } from "./store/appNavigation";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { ShellExpandProvider, useShellExpand } from "./lib/shellExpand";
 import {
@@ -292,8 +295,9 @@ const TranscriptSelectionMenu = lazy(() => import("./components/TranscriptSelect
 const ContextPanel = lazy(() => import("./components/ContextPanel").then((module) => ({ default: module.ContextPanel })));
 const HistoryPanel = lazy(() => import("./components/HistoryPanel").then((module) => ({ default: module.HistoryPanel })));
 const SessionRecoveryVersionsHost = lazy(() => import("./components/SessionRecoveryVersionsHost").then((module) => ({ default: module.SessionRecoveryVersionsHost })));
-const HeartbeatView = lazy(() => import("./custom/features/heartbeat/HeartbeatPanel").then((module) => ({ default: module.HeartbeatView })));
-const SettingsPanel = lazy(() => import("./components/SettingsPanelEntry").then((module) => ({ default: module.SettingsPanel })));
+const loadTrashPage = () => import("./components/TrashPage").then((module) => ({ default: module.TrashPage }));
+const loadAutomationPage = () => import("./custom/features/heartbeat/HeartbeatPanel").then((module) => ({ default: module.HeartbeatView }));
+const loadSettingsPage = () => import("./components/SettingsPanelEntry").then((module) => ({ default: module.SettingsPanel }));
 const RemotePanel = lazy(() => import("./components/RemotePanel").then((module) => ({ default: module.RemotePanel })));
 const TerminalPanel = lazy(() => import("./components/TerminalPanel").then((module) => ({ default: module.TerminalPanel })));
 const TaskMonitorPanel = lazy(() => import("./components/TaskMonitorPanel").then((module) => ({ default: module.TaskMonitorPanel })));
@@ -431,8 +435,7 @@ function WindowsWindowControls({
 }
 type HistoryViewState =
   | { kind: "history"; source: "scope"; filter: HistoryScopeFilter; sessions: SessionMeta[] }
-  | { kind: "history"; source: "all"; sessions: SessionMeta[] }
-  | { kind: "trash"; sessions: SessionMeta[] };
+  | { kind: "history"; source: "all"; sessions: SessionMeta[] };
 type SidebarImPlatform = "qq" | "feishu" | "lark" | "weixin";
 type SidebarImStatus = "connected" | "disabled" | "pending" | "error" | "disconnected";
 type SidebarImConnection = {
@@ -1074,10 +1077,18 @@ export default function App() {
   const needsOnboarding = useOverlayStore((s) => s.needsOnboarding);
   const setNeedsOnboarding = useOverlayStore((s) => s.setNeedsOnboarding);
   const [providerSetupNeeded, setProviderSetupNeeded] = useState(false);
-  const settingsTarget = useOverlayStore((s) => s.settingsTarget);
-  const setSettingsTarget = useOverlayStore((s) => s.setSettingsTarget);
-  const settingsFocus = useOverlayStore((s) => s.settingsFocus);
-  const setSettingsFocus = useOverlayStore((s) => s.setSettingsFocus);
+  const page = useAppNavigationStore((s) => s.page);
+  const managementActive = page.kind !== "workspace";
+  const settingsTarget = page.kind === "settings" ? page.tab : null;
+  const openPage = useAppNavigationStore((s) => s.openPage);
+  const returnToWorkspace = useAppNavigationStore((s) => s.returnToWorkspace);
+  const enterConversation = useAppNavigationStore((s) => s.enterConversation);
+  const visitedTrash = useAppNavigationStore((s) => s.visitedTrash);
+  const visitedAutomation = useAppNavigationStore((s) => s.visitedAutomation);
+  const automationReturn = useAppNavigationStore((s) => s.automationReturn);
+  const setSettingsTarget = useAppNavigationStore((s) => s.setSettingsTarget);
+  const settingsFocus = useAppNavigationStore((s) => s.settingsFocus);
+  const setSettingsFocus = useAppNavigationStore((s) => s.setSettingsFocus);
   const [desktopLayoutStyle, setDesktopLayoutStyle] = useState<DesktopLayoutStyle>("workbench");
   const singleSurfaceLayout = desktopLayoutStyle === "workbench" || desktopLayoutStyle === "creation";
   const { configLoadWarnings, applySnapshot: applyConfigWarningSnapshot, reload: reloadConfigWarnings, dismiss: dismissConfigWarnings } = useConfigLoadWarnings();
@@ -1111,8 +1122,6 @@ export default function App() {
   const [sidebarImDetailConnectionId, setSidebarImDetailConnectionId] = useState("");
   const sidebarCollapsed = useLayoutStore((s) => s.sidebarCollapsed);
   const setSidebarCollapsed = useLayoutStore((s) => s.setSidebarCollapsed);
-  const mainView = useOverlayStore((s) => s.mainView);
-  const setMainView = useOverlayStore((s) => s.setMainView);
   type TimeFilter = "all" | "10" | "20" | "1h" | "3h" | "5h" | "1d";
   const [topicTimeFilter, setTopicTimeFilter] = useState<TimeFilter>(() => {
     try {
@@ -1249,20 +1258,6 @@ export default function App() {
   const sidebarSearchOpen = useOverlayStore((s) => s.sidebarSearchOpen);
   const setSidebarSearchOpen = useOverlayStore((s) => s.setSidebarSearchOpen);
 
-  // Leaving the automation view: any overlay/sidebar surface that signals the
-  // user is returning to the chat workspace switches mainView back to "chat".
-  // Navigation paths (open topic / new session / resume) are covered by
-  // enqueueNavigation.
-  useEffect(() => {
-    if (mainView !== "automation") return;
-    // Any chat-side overlay/surface counts as "returning to the chat
-    // workspace": settings, palette, sidebar search, history, the shortcuts
-    // cheatsheet and the topic export menu all switch mainView back to chat.
-    if (settingsTarget !== null || paletteOpen || sidebarSearchOpen || histView !== null
-      || shortcutsOpen || topicExportOpen) {
-      setMainView("chat");
-    }
-  }, [mainView, settingsTarget, paletteOpen, sidebarSearchOpen, histView, shortcutsOpen, topicExportOpen, setMainView]);
   const sidebarSearchFocusSignal = useOverlayStore((s) => s.sidebarSearchFocusSignal);
   const setSidebarSearchFocusSignal = useOverlayStore((s) => s.setSidebarSearchFocusSignal);
   const [sidebarTogglePressed, setSidebarTogglePressed] = useState(false);
@@ -1277,6 +1272,7 @@ export default function App() {
   const topicRenameCommitHandledRef = useRef(false);
   const appRef = useRef<HTMLDivElement>(null);
   const layoutRef = useRef<HTMLDivElement>(null);
+  useManagementWorkspace(layoutRef, managementActive);
   const workspacePanelResizeFinishRef = useRef<(() => void) | null>(null);
   const sidebarTogglePressTimerRef = useRef<number | null>(null);
 
@@ -1501,7 +1497,7 @@ export default function App() {
     if (typeof window === "undefined" || !window.runtime) return;
     return window.runtime.EventsOn("app:open-settings", () => {
       closeTransientOverlays();
-      setSettingsTarget("general");
+      setSettingsTarget(useAppNavigationStore.getState().lastSettingsTarget);
     });
   }, [closeTransientOverlays]);
   useEffect(() => {
@@ -1578,9 +1574,8 @@ export default function App() {
     minWidth: workspacePanelMinWidth, minRenderWidth: rightDockMinRenderWidth,
     liveWidth: liveWorkspacePanelRenderWidth,
   });
-  const automationView = mainView === "automation";
-  const effectiveWorkspacePanelRenderable = automationView ? false : workspacePanelRenderable;
-  const effectiveWorkspacePanelGridOpen = automationView ? false : workspacePanelGridOpen;
+  const effectiveWorkspacePanelRenderable = workspacePanelRenderable;
+  const effectiveWorkspacePanelGridOpen = workspacePanelGridOpen;
   const resolveLiveWorkspacePanelRenderWidth = useCallback(
     (preferredWidth: number, nextSidebarWidth = sidebarWidth) =>
       resolveLiveWorkspacePanelWidth({
@@ -2969,12 +2964,12 @@ export default function App() {
 
   useGlobalShortcut("terminal.toggle", () => {
     toggleTerminalPanel();
-  }, [toggleTerminalPanel]);
+  }, [toggleTerminalPanel], !managementActive);
   useGlobalShortcut("terminal.newSession", () => {
     if (!activeTabId || remoteSurfaceActive) return;
     setTerminalPanelOpen(true); saveTerminalPanelOpen(true);
     void useTerminalStore.getState().createSession(activeTabId, ".", "default").catch(() => {});
-  }, [activeTabId, remoteSurfaceActive, setTerminalPanelOpen]);
+  }, [activeTabId, remoteSurfaceActive, setTerminalPanelOpen], !managementActive);
 
   useEffect(() => {
     if (!remoteExplorerOpen) return;
@@ -3157,8 +3152,8 @@ export default function App() {
   const tabSwitchRunningRef = useRef(false);
   const tabSwitchPendingRef = useRef<PendingNavigationRequest<{ tabId: string; optimisticTab?: TabMeta; navigationIntentSeq: number }> | null>(null);
   const enterChatViewForTabNavigation = useCallback(() => {
-    setMainView("chat");
-  }, [setMainView]);
+    enterConversation();
+  }, [enterConversation]);
   const enqueueTabSwitch = useCallback(
     (tabId: string, optimisticTab?: TabMeta): Promise<void> => {
       enterChatViewForTabNavigation();
@@ -3656,8 +3651,9 @@ export default function App() {
 
   const openTrash = useCallback(async () => {
     closeTransientOverlays();
-    setHistView({ kind: "trash", sessions: await listTrashedSessions() });
-  }, [closeTransientOverlays, listTrashedSessions]);
+    setHistView(null);
+    openPage({ kind: "trash" });
+  }, [closeTransientOverlays, openPage]);
   const closeHistory = useCallback(() => {
     closeTransientOverlays();
     setHistView(null);
@@ -3674,6 +3670,13 @@ export default function App() {
     );
   }, [listSessions]);
 
+  const automationLinkRef = useRef<{ intent: number; generation: number } | null>(null);
+  useEffect(() => useAppNavigationStore.subscribe((next, previous) => {
+    if (next.generation !== previous.generation && automationLinkRef.current) {
+      automationLinkRef.current = null;
+      noteNavigationIntent();
+    }
+  }), [noteNavigationIntent]);
   const navigationSeqRef = useRef(0);
   const navigationRunningRef = useRef(false);
   const navigationPendingRef = useRef<PendingDesktopNavigationRequest | null>(null);
@@ -3703,6 +3706,11 @@ export default function App() {
         const openedTab = await openTopicTarget(request.scope, request.workspaceRoot, request.topicId, request.sessionPath);
         if (!latest()) return;
         seedActiveTabMeta(openedTab);
+        const link = automationLinkRef.current;
+        if (link?.intent === request.navigationIntentSeq) {
+          useAppNavigationStore.getState().returnFromAutomationLink(link.generation);
+          automationLinkRef.current = null;
+        }
         void refreshLatestTabMetas();
         setTabRevealSignal((signal) => signal + 1);
         setTranscriptRevealSignal((signal) => signal + 1);
@@ -3838,10 +3846,16 @@ export default function App() {
     );
   }, [beginNavigationSurface, runNavigationRequest, settleNavigationSurface]);
 
+  const openAutomationTopic = useCallback((scope: string, workspaceRoot: string, topicId: string) => {
+    const intent = noteNavigationIntent();
+    automationLinkRef.current = { intent, generation: useAppNavigationStore.getState().generation };
+    void enqueueNavigationWithIntent({ kind: "topic", scope, workspaceRoot, topicId }, intent);
+  }, [noteNavigationIntent, enqueueNavigationWithIntent]);
+
   const enqueueNavigation = useCallback((input: DesktopNavigationIntent): Promise<void> => {
     // Any navigation (open topic / new session / resume) leaves the automation
     // view and returns to the chat workspace.
-    setMainView("chat");
+    enterConversation();
     // Invalidate any in-flight activation's stale apply at ENQUEUE time. The
     // queue serializes requests, so a click made while another request runs
     // only advances the controller's navigation epoch when it eventually
@@ -3850,7 +3864,7 @@ export default function App() {
     // newer surface's cached state (#6613 review).
     const navigationIntentSeq = noteNavigationIntent();
     return enqueueNavigationWithIntent(input, navigationIntentSeq);
-  }, [enqueueNavigationWithIntent, noteNavigationIntent, setMainView]);
+  }, [enqueueNavigationWithIntent, noteNavigationIntent, enterConversation]);
 
   const openBlankSession = useCallback((scope: string, workspaceRoot: string): Promise<void> =>
     enqueueNavigation({ kind: "blank", scope, workspaceRoot: scope === "project" ? workspaceRoot : "" }),
@@ -3939,13 +3953,14 @@ export default function App() {
   useGlobalShortcut("app.newSession", () => void handleNewTab(), [handleNewTab]);
   useGlobalShortcut("settings.open", () => {
     closeTransientOverlays();
-    setSettingsTarget("general");
+    setSettingsTarget(useAppNavigationStore.getState().lastSettingsTarget);
   }, [closeTransientOverlays]);
   useGlobalShortcut("tab.close", () => {
-    if (activeTabId) void handleTabClose(activeTabId);
-  }, [activeTabId, handleTabClose], Boolean(activeTabId));
+    if (managementActive) returnToWorkspace();
+    else if (activeTabId) void handleTabClose(activeTabId);
+  }, [activeTabId, handleTabClose, managementActive, returnToWorkspace], managementActive || Boolean(activeTabId));
   useGlobalShortcut("shortcuts.show", () => setShortcutsOpen(true));
-  useGlobalShortcut("sidebar.toggle", toggleSidebar, [toggleSidebar]);
+  useGlobalShortcut("sidebar.toggle", toggleSidebar, [toggleSidebar], !managementActive);
 
   // --- Topic shortcut navigation (Cmd/Ctrl+1-9) ---
   const visibleTopicsRef = useRef<TopicShortcutEntry[]>([]);
@@ -3955,11 +3970,11 @@ export default function App() {
   const handleNavigateTopic = useCallback((entry: TopicShortcutEntry) => {
     void handleOpenTopic(entry.scope, entry.workspaceRoot, entry.topicId, entry.sessionPath);
   }, [handleOpenTopic]);
-  const { showBadges: showTopicBadges } = useTopicShortcuts(!sidebarCollapsed, desktopPlatform);
+  const { showBadges: showTopicBadges } = useTopicShortcuts(!sidebarCollapsed && !managementActive, desktopPlatform);
 
   // Register Cmd/Ctrl+1-9 shortcuts for topic navigation
   useEffect(() => {
-    if (sidebarCollapsed) return;
+    if (sidebarCollapsed || managementActive) return;
     const onKeydown = (event: globalThis.KeyboardEvent) => {
       const idx = topicShortcutIndexFromEvent(event, desktopPlatform);
       if (idx === null) return;
@@ -3971,13 +3986,14 @@ export default function App() {
     };
     document.addEventListener("keydown", onKeydown);
     return () => document.removeEventListener("keydown", onKeydown);
-  }, [sidebarCollapsed, desktopPlatform, handleNavigateTopic]);
+  }, [sidebarCollapsed, managementActive, desktopPlatform, handleNavigateTopic]);
 
   const paletteItems = useMemo<PaletteItem[]>(() => {
     const cmds: PaletteItem[] = [
       { id: "cmd-new", group: t("palette.group.commands"), title: t("palette.cmd.newSession"), icon: <SquarePen size={15} />, compact: true, keywords: ["new", "新建"], run: () => void handleNewTab() },
+      { id: "cmd-automation", group: t("palette.group.commands"), title: t("sidebar.automation"), icon: <AlarmClock size={15} />, compact: true, keywords: ["automation", "自动化"], run: () => openPage({ kind: "automation" }) },
       { id: "cmd-trash", group: t("palette.group.commands"), title: t("palette.cmd.trash"), icon: <Trash2 size={15} />, compact: true, keywords: ["trash", "回收站"], run: () => void openTrash() },
-      { id: "cmd-settings", group: t("palette.group.commands"), title: t("palette.cmd.settings"), icon: <SettingsIcon size={15} />, compact: true, keywords: ["settings", "设置"], run: () => setSettingsTarget("general") },
+      { id: "cmd-settings", group: t("palette.group.commands"), title: t("palette.cmd.settings"), icon: <SettingsIcon size={15} />, compact: true, keywords: ["settings", "设置"], run: () => setSettingsTarget(useAppNavigationStore.getState().lastSettingsTarget) },
       { id: "cmd-appearance", group: t("palette.group.commands"), title: t("palette.cmd.appearance"), icon: <Palette size={15} />, compact: true, keywords: ["theme", "appearance", "外观", "主题"], run: () => setSettingsTarget("appearance") },
       {
         id: "cmd-theme-reset",
@@ -4122,36 +4138,10 @@ export default function App() {
     },
     [state.running, renameSession, listSessions],
   );
-  const onRestoreTrashedSession = useCallback(
-    async (path: string) => {
-      await restoreSession(path);
-      const trashed = await listTrashedSessions();
-      setHistView((cur) => (cur === null ? null : { kind: "trash", sessions: trashed }));
-    },
-    [restoreSession, listTrashedSessions],
-  );
-  const onPurgeTrashedSession = useCallback(
-    async (path: string) => {
-      await purgeTrashedSession(path);
-      const trashed = await listTrashedSessions();
-      setHistView((cur) => (cur === null ? null : { kind: "trash", sessions: trashed }));
-    },
-    [purgeTrashedSession, listTrashedSessions],
-  );
-  const onPurgeAllTrashedSessions = useCallback(
-    async (paths: string[]) => {
-      const uniquePaths = Array.from(new Set(paths));
-      for (const path of uniquePaths) {
-        await purgeTrashedSession(path);
-      }
-      const trashed = await listTrashedSessions();
-      setHistView((cur) => (cur === null ? null : { kind: "trash", sessions: trashed }));
-    },
-    [purgeTrashedSession, listTrashedSessions],
-  );
   // Workspace: open the folder chooser and switch projects. The hook resets the
   // transcript and refreshes meta on a pick. A cancel is a no-op.
   const switchFolder = useCallback(async (path?: string) => {
+    enterConversation();
     const navigationIntentSeq = noteNavigationIntent();
     beginNavigationSurface(navigationIntentSeq);
     try {
@@ -4170,7 +4160,7 @@ export default function App() {
     } finally {
       settleNavigationSurface(navigationIntentSeq);
     }
-  }, [beginNavigationSurface, isNavigationIntentCurrent, noteNavigationIntent, pickWorkspace, refreshTabMetas, settleNavigationSurface, switchWorkspace]);
+  }, [enterConversation, beginNavigationSurface, isNavigationIntentCurrent, noteNavigationIntent, pickWorkspace, refreshTabMetas, settleNavigationSurface, switchWorkspace]);
 
   const refreshProjectsAndTabs = useCallback(async () => {
     setProjectRevision((value) => value + 1);
@@ -4288,7 +4278,7 @@ export default function App() {
   const handleChromeTitlebarDoubleClick = useCallback((event: ReactMouseEvent<HTMLDivElement>) => {
     if (!chromeDoubleClickZooms) return;
     const target = event.target as HTMLElement | null;
-    const onChromeSurface = target?.closest(".app-chrome, .topicbar, .workbench-dock__tools");
+    const onChromeSurface = target?.closest(".app-chrome, .topicbar, .workbench-dock__tools, .settings-screen__chrome");
     const onMacOSWorkbenchSidebarTitlebar = isMacOSWorkbenchSidebarTitlebar(target, event.clientY, desktopPlatform);
     if (!onChromeSurface && !onMacOSWorkbenchSidebarTitlebar) return;
     if (target?.closest("button, input, textarea, select, a, [role='button'], [role='tab'], .windows-window-controls")) return;
@@ -4326,7 +4316,7 @@ export default function App() {
       ].filter(Boolean).join(" ")}
     >
       <ThemeBackground />
-      {sidebarWorkbench && <div className="app__dock-toggle">{dockToggleButton}</div>}
+      {sidebarWorkbench && <div className="app__dock-toggle" inert={managementActive}>{dockToggleButton}</div>}
       <div
         ref={layoutRef}
         className={[
@@ -4459,7 +4449,7 @@ export default function App() {
                 <button
                   className="sidebar-feature-zone__item"
                   type="button"
-                  onClick={() => setMainView("automation")}
+                  onClick={(event) => { event.currentTarget.focus({ preventScroll: true }); openPage({ kind: "automation" }); }}
                 >
                   <AlarmClock size={14} aria-hidden="true" />
                   <span>{t("sidebar.automation")}</span>
@@ -4503,7 +4493,7 @@ export default function App() {
                   <button
                     className="sidebar__utility-button"
                     type="button"
-                    onClick={() => void openTrash()}
+                    onClick={(event) => { event.currentTarget.focus({ preventScroll: true }); void openTrash(); }}
                   >
                     <Trash2 size={16} aria-hidden="true" />
                     <span className="sr-only">{t("sidebar.trash")}</span>
@@ -4513,7 +4503,7 @@ export default function App() {
                   <button
                     className="sidebar__utility-button"
                     type="button"
-                    onClick={() => setMainView("automation")}
+                    onClick={(event) => { event.currentTarget.focus({ preventScroll: true }); openPage({ kind: "automation" }); }}
                   >
                     <AlarmClock size={16} aria-hidden="true" />
                     <span className="sr-only">{t("sidebar.automation")}</span>
@@ -4523,9 +4513,10 @@ export default function App() {
                   <button
                     className="sidebar__utility-button"
                     type="button"
-                    onClick={() => {
+                    onClick={(event) => {
+                      event.currentTarget.focus({ preventScroll: true });
                       closeTransientOverlays();
-                      setSettingsTarget("general");
+                      setSettingsTarget(useAppNavigationStore.getState().lastSettingsTarget);
                     }}
                   >
                     <SettingsIcon size={16} aria-hidden="true" />
@@ -4556,7 +4547,7 @@ export default function App() {
               <Tooltip label={t("sidebar.trash")} fill side="right" disabled={sidebarNavTooltipDisabled}>
                 <button
                   className="sidebar__navitem"
-                  onClick={() => void openTrash()}
+                  onClick={(event) => { event.currentTarget.focus({ preventScroll: true }); void openTrash(); }}
                 >
                   <Trash2 size={15} />
                   <span>{t("sidebar.trash")}</span>
@@ -4566,7 +4557,7 @@ export default function App() {
                 <Tooltip label={t("heartbeat.scheduler")} fill side="right" disabled={sidebarNavTooltipDisabled}>
                   <button
                     className="sidebar__navitem"
-                    onClick={() => setMainView("automation")}
+                    onClick={(event) => { event.currentTarget.focus({ preventScroll: true }); openPage({ kind: "automation" }); }}
                   >
                     <AlarmClock size={15} />
                     <span>{t("sidebar.automation")}</span>
@@ -4576,9 +4567,10 @@ export default function App() {
               <Tooltip label={t("topbar.settings")} fill side="right" disabled={sidebarNavTooltipDisabled}>
                 <button
                   className="sidebar__navitem"
-                  onClick={() => {
+                  onClick={(event) => {
+                    event.currentTarget.focus({ preventScroll: true });
                     closeTransientOverlays();
-                    setSettingsTarget("general");
+                    setSettingsTarget(useAppNavigationStore.getState().lastSettingsTarget);
                   }}
                 >
                   <SettingsIcon size={15} />
@@ -4616,15 +4608,8 @@ export default function App() {
         )}
 
         <section className={`chat-pane${creationEmptyHero ? " chat-pane--creation-empty" : ""}`}>
-          {mainView === "automation" ? (
-            <Suspense fallback={<div className="heartbeat-page" />}>
-              <HeartbeatView onOpenTopic={(scope, workspaceRoot, topicId) => {
-                void handleOpenTopic(scope, workspaceRoot, topicId);
-              }} />
-            </Suspense>
-          ) : (
-          <>
           <header className="topicbar">
+            {automationReturn && <button className="btn btn--small" type="button" onClick={(event) => { event.currentTarget.focus({ preventScroll: true }); openPage({ kind: "automation" }); }}>{locale === "en" ? "Back to automation" : locale === "zh-TW" ? "返回自動化" : "返回自动化"}</button>}
             {workbenchChromeHidden && (
               <Tooltip label={sidebarToggleTitle}>
                 <button
@@ -5198,8 +5183,6 @@ export default function App() {
             </div>
           </footer>
           )}
-          </>
-          )}
         </section>
 
         {surfaceWorkspacePanelGridOpen && (
@@ -5431,9 +5414,6 @@ export default function App() {
             onPreview={previewSession}
             onDelete={onDeleteSession}
             onRename={onRenameHistorySession}
-            onRestore={onRestoreTrashedSession}
-            onPurge={onPurgeTrashedSession}
-            onPurgeAll={onPurgeAllTrashedSessions}
             onInspectVersions={requestSessionVersions}
             onClose={closeHistory}
           />
@@ -5449,35 +5429,29 @@ export default function App() {
         />
       </Suspense>
 
-      {settingsTarget !== null && (
-        <Suspense fallback={null}>
-          <SettingsPanel
-            initialTab={settingsTarget}
-            initialFocus={settingsFocus ?? undefined}
-            agentRunning={state.running}
-            desktopPlatform={desktopPlatform}
-            activeWorkspaceKey={`${activeTab?.id ?? activeTabId ?? ""}\u0000${activeTab?.workspaceRoot ?? activeTab?.cwd ?? state.meta?.cwd ?? ""}`}
-            onUseSubagent={prefillSubagentCommand}
-            onClose={() => {
-              setSettingsFocus(null);
-              setSettingsTarget(null);
-            }}
-            onChanged={(settings) => {
-              void refreshMeta();
-              void refreshProviderSetupState().catch(() => {});
-              if (settings) {
-                applyDesktopPreferences(settings);
-                void refreshSidebarImConnectionsFromSettings(settings).catch((e) => console.warn("bot sidebar refresh failed", e));
-                return;
-              }
-              void reloadSidebarImConnections().catch((e) => console.warn("bot sidebar refresh failed", e));
-              void app.DesktopStartupSettings()
-                .then(applyDesktopPreferences)
-                .catch((e) => console.warn("desktop preferences refresh failed", e));
-            }}
-          />
-        </Suspense>
-      )}
+      {visitedTrash && <ManagementSurface loader={loadTrashPage} active={page.kind === "trash"} onBack={returnToWorkspace}
+        surfaceProps={{ active: page.kind === "trash", onBack: returnToWorkspace, list: listTrashedSessions, restore: restoreSession, purge: purgeTrashedSession }} />}
+      {visitedAutomation && <ManagementSurface loader={loadAutomationPage} active={page.kind === "automation"} onBack={returnToWorkspace}
+        surfaceProps={{ active: page.kind === "automation", onBack: returnToWorkspace, onOpenTopic: openAutomationTopic }} />}
+
+      {settingsTarget !== null && <ManagementSurface loader={loadSettingsPage} active onBack={returnToWorkspace} surfaceProps={{
+        initialTab: settingsTarget, onNavigate: setSettingsTarget, initialFocus: settingsFocus ?? undefined,
+        agentRunning: state.running, desktopPlatform,
+        activeWorkspaceKey: `${activeTab?.id ?? activeTabId ?? ""}\u0000${activeTab?.workspaceRoot ?? activeTab?.cwd ?? state.meta?.cwd ?? ""}`,
+        onUseSubagent: prefillSubagentCommand,
+        onClose: () => { setSettingsFocus(null); returnToWorkspace(); },
+        onChanged: (settings?: SettingsView | null) => {
+          void refreshMeta();
+          void refreshProviderSetupState().catch(() => {});
+          if (settings) {
+            applyDesktopPreferences(settings);
+            void refreshSidebarImConnectionsFromSettings(settings).catch((e) => console.warn("bot sidebar refresh failed", e));
+            return;
+          }
+          void reloadSidebarImConnections().catch((e) => console.warn("bot sidebar refresh failed", e));
+          void app.DesktopStartupSettings().then(applyDesktopPreferences).catch((e) => console.warn("desktop preferences refresh failed", e));
+        },
+      }} />}
 
       <RemoteHostKeyDialog />
       <RemoteSecretDialog />

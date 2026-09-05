@@ -2139,6 +2139,14 @@ func (e *ProviderEntry) APIKey() string {
 	return value
 }
 
+// WithAPIKeyForProbe returns a private copy with a draft credential. It neither
+// persists the value nor mutates process environment shared by other requests.
+func (e ProviderEntry) WithAPIKeyForProbe(value string) ProviderEntry {
+	e.resolvedAPIKey = strings.TrimSpace(value)
+	e.resolvedSource = CredentialSource{Kind: CredentialSourceEnvironment, Label: "settings probe"}
+	return e
+}
+
 // ResolveAPIKeyFromProcessEnvForProbe pins a setup-time, user-entered key onto
 // this entry for an immediate connectivity probe. Normal runtime resolution does
 // not call this; loaded provider entries still resolve only from Reasonix's

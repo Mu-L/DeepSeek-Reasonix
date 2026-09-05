@@ -3016,6 +3016,12 @@ func providerPresetNoExistingProviderError(id string) error {
 // The probe rides the configured network proxy so a broken proxy path fails
 // here, at setup time, instead of succeeding and stalling chat later (#9560).
 func (a *App) FetchProviderModelCatalog(p ProviderView) ([]ProviderModelCapabilityView, error) {
+	return a.FetchProviderModelCatalogDraft(p, "")
+}
+
+// FetchProviderModelCatalogDraft discovers models using an unsaved credential.
+// Draft secrets are request-local and never enter the settings response or cache.
+func (a *App) FetchProviderModelCatalogDraft(p ProviderView, key string) ([]ProviderModelCapabilityView, error) {
 	root := a.activeWorkspaceRoot()
 	e := config.ProviderEntry{
 		Name:       p.Name,
@@ -3027,6 +3033,9 @@ func (a *App) FetchProviderModelCatalog(p ProviderView) ([]ProviderModelCapabili
 		AuthHeader: p.AuthHeader,
 	}
 	e.ResolveAPIKeyForRoot(root)
+	if strings.TrimSpace(key) != "" {
+		e = e.WithAPIKeyForProbe(key)
+	}
 	ctx, cancel := context.WithTimeout(a.reqCtx(), 15*time.Second)
 	defer cancel()
 	models, err := e.FetchModelCatalogWithProxy(ctx, withProbeDirectHost(a.networkProxySpecForRoot(root), e.BaseURL, p.NoProxy))

@@ -320,7 +320,7 @@ const providerUrlLabel = Array.from(rootEl.querySelectorAll<HTMLLabelElement>("l
   (label) => label.htmlFor === providerUrlInput?.id,
 );
 ok(Boolean(providerUrlLabel) && providerUrlInput?.getAttribute("aria-describedby") !== null, "provider URL input has a programmatic label and description");
-ok(rootEl.textContent?.includes("Reasonix uses it unchanged.") === true, "provider URL helper explains exact request behavior");
+ok(rootEl.textContent?.includes("Request URL:") === true, "provider URL helper explains exact request behavior");
 ok(rootEl.querySelector<HTMLInputElement>('input[placeholder="e.g. my-proxy"]')?.disabled !== true, "new custom provider name stays editable");
 ok(rootEl.querySelector<HTMLInputElement>('input[placeholder="e.g. my-proxy"]')?.nextElementSibling?.classList.contains("mem-hint") !== true, "new custom provider editor omits the rename hint");
 
@@ -335,7 +335,7 @@ await act(async () => {
 const webSearchSwitch = rootEl.querySelector<HTMLInputElement>('input[role="switch"]');
 ok(rootEl.textContent?.includes("Server-side web search") === true, "DeepSeek Responses editor separates service capabilities from model selection");
 ok(webSearchSwitch?.checked === true, "curated DeepSeek Responses capability is enabled in the editor");
-ok(rootEl.textContent?.includes("No image input") === true, "DeepSeek Responses editor renders model image capability read-only");
+ok(rootEl.textContent?.includes("Text") === true, "DeepSeek Responses editor renders model image capability read-only");
 ok(
   rootEl.querySelectorAll('.provider-model-draft__capabilities input[type="checkbox"]').length === 0,
   "DeepSeek Responses editor does not render an image-capability checkbox",
@@ -353,12 +353,12 @@ await act(async () => {
   await flushPromises();
 });
 ok(
-  rootEl.textContent?.includes("No image input") === true,
+  rootEl.textContent?.includes("Text") === true,
   "provider editor honors backend vision capability for endpoints outside the legacy frontend heuristic",
 );
 const customProviderUrlInput = rootEl.querySelector<HTMLInputElement>(".provider-url-input");
 ok(rootEl.querySelectorAll('input[type="radio"]').length === 0, "existing custom providers no longer expose an address mode selector");
-ok(customProviderUrlInput?.value === "https://eu.deepseek.com/v1/chat/completions", "legacy base-only providers display their previously effective request URL");
+ok(customProviderUrlInput?.value === backendUnsupportedCustomProvider.baseUrl && rootEl.textContent?.includes("https://eu.deepseek.com/v1/chat/completions") === true, "legacy base-only providers display their previously effective request URL");
 ok(rootEl.querySelector<HTMLInputElement>('input[placeholder="e.g. my-proxy"]')?.disabled === true, "existing custom provider name is locked");
 ok(rootEl.querySelector<HTMLInputElement>('input[placeholder="e.g. my-proxy"]')?.nextElementSibling?.textContent === "Changing the provider name is not supported yet", "existing custom provider editor shows the rename hint");
 
@@ -370,7 +370,7 @@ await act(async () => {
   await flushPromises();
 });
 const legacyProviderUrlInput = rootEl.querySelector<HTMLInputElement>(".provider-url-input");
-ok(legacyProviderUrlInput?.value === "https://legacy.example.com/chat/completions", "legacy OpenAI chat URLs display their historically normalized effective endpoint");
+ok(legacyProviderUrlInput?.value === legacyChatURLProvider.baseUrl && rootEl.textContent?.includes("https://legacy.example.com/chat/completions") === true, "legacy OpenAI chat URLs display their historically normalized effective endpoint");
 const saveButton = Array.from(rootEl.querySelectorAll<HTMLButtonElement>("button")).find(
   (button) => button.textContent?.trim() === "Save",
 );
@@ -401,6 +401,15 @@ await act(async () => {
 });
 ok(exactProvider?.requestUrl === "https://exact.example.com/custom/?token=1" && exactProvider?.baseUrl === legacyChatURLProvider.baseUrl, "saving preserves an explicit requestUrl and independent baseUrl exactly");
 ok(exactProvider?.chatUrl === exactProvider?.requestUrl, "saving mirrors the exact OpenAI request URL for previous releases");
+
+await act(async () => {
+  root.render(renderProviderEditor({ ...legacyChatURLProvider, name: "save-failure" }, () => { throw new Error("storage unavailable"); }));
+  await flushPromises();
+});
+const failedSaveButton = Array.from(rootEl.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.trim() === "Save");
+await act(async () => { failedSaveButton?.click(); await flushPromises(); });
+ok(rootEl.textContent?.includes("storage unavailable") === true, "save errors remain visible in the provider form");
+ok(rootEl.querySelector<HTMLInputElement>(".provider-url-input")?.value === legacyChatURLProvider.baseUrl && rootEl.querySelector(".provider-model-row") !== null, "failed save retains connection and model drafts");
 
 await act(async () => {
   root.unmount();

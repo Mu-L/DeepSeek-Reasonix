@@ -198,7 +198,10 @@ console.log("\nbundle budgets");
 // Direct topic-bar actions replace the overflow trigger: the same-toolchain
 // base measures 464.073 KiB and the restored buttons measure 464.259 KiB
 // (+0.186 KiB). Export formats remain lazy; retain the next decimal ceiling.
-const initialJSBudgetKiB = 464.3;
+// Shared management navigation, workspace focus isolation and retryable lazy
+// surfaces measure 464.974 KiB (previous in-progress build: 464.2 KiB).
+// Editors and previews remain lazy; retain one decimal of rounding headroom.
+const initialJSBudgetKiB = 465.1;
 assertBudget("initial JavaScript gzip", initialJSGzip, initialJSBudgetKiB * 1024);
 assertBudget("largest initial JavaScript chunk gzip", largestInitialJS, 280 * 1024);
 // Render-blocking CSS is intentionally absent: styles.css loads deferred via
@@ -366,6 +369,9 @@ const rawInitialBytes = [...initialJS, ...initialCSS, ...appShellCSS]
 // 2476.5 KiB raw versus 2475.554 KiB on the same-toolchain base. The extra
 // CSS reserves the workspace-toggle hit area and lets all four tabs shrink;
 // retain only the next one-decimal ceiling.
-const rawInitialBudgetKiB = 2_476.6;
+// Shared management navigation, palette entry and native AX entry-focus
+// restoration measure 2477.0 KiB raw (prior in-progress build: 2474.6 KiB).
+// Feature bodies remain lazy; keep a single decimal of rounding headroom.
+const rawInitialBudgetKiB = 2_477.1;
 assertBudget("initial raw JavaScript and CSS", rawInitialBytes, rawInitialBudgetKiB * 1024);
 assertBudget("largest initial JavaScript chunk raw", largestInitialJSRaw, 1_000 * 1024);
