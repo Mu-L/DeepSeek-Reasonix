@@ -116,6 +116,7 @@ func TestRunVersionedLayoutDoesNotReadOrClaimLegacyPending(t *testing.T) {
 	originalStageInstaller := stageInstallerFn
 	originalClaimInstallerExecution := claimInstallerExecutionFn
 	originalReconcileUninstall := reconcileWindowsUninstallRegistrationFn
+	originalTerminate := terminateSupersededDesktopsFn
 	t.Cleanup(func() {
 		runInstallerFn = originalInstaller
 		startRelaunchFn = originalRelaunch
@@ -123,7 +124,9 @@ func TestRunVersionedLayoutDoesNotReadOrClaimLegacyPending(t *testing.T) {
 		stageInstallerFn = originalStageInstaller
 		claimInstallerExecutionFn = originalClaimInstallerExecution
 		reconcileWindowsUninstallRegistrationFn = originalReconcileUninstall
+		terminateSupersededDesktopsFn = originalTerminate
 	})
+	terminateSupersededDesktopsFn = func(string) int { return 0 }
 	legacyClaimed := false
 	claimPendingFileUpdateFn = func(string, string, string, string, []string, time.Duration) (*repair.UpdateTransaction, func(), error) {
 		legacyClaimed = true
@@ -174,6 +177,93 @@ func TestRunVersionedLayoutDoesNotReadOrClaimLegacyPending(t *testing.T) {
 	ptr, err := installlayout.ReadCurrent(installDir)
 	if err != nil || ptr.ActiveVersion != "v1.20.1" {
 		t.Fatalf("pointer=%+v err=%v", ptr, err)
+	}
+}
+
+func TestRunVersionedUpdateRelaunchesLauncherNotOldDesktop(t *testing.T) {
+	installDir := t.TempDir()
+	seed := t.TempDir()
+	for _, name := range []string{"reasonix-desktop.exe", "reasonix-cli.exe", "reasonix-update-helper.exe", "reasonix-launcher.exe"} {
+		if err := os.WriteFile(filepath.Join(seed, name), []byte("old-"+name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := activateVersionedWindowsFromStaging(&repair.UpdateTransaction{
+		SchemaVersion: 1,
+		ToVersion:     "v1.24.0",
+		TargetKind:    "file",
+		TargetPath:    filepath.Join(installDir, "reasonix-desktop.exe"),
+		CreatedAt:     "2026-01-01T00:00:00Z",
+	}, seed); err != nil {
+		t.Fatal(err)
+	}
+	oldDesktop, err := installlayout.ActiveDesktopPath(installDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	originalInstaller := runInstallerFn
+	originalRelaunch := startRelaunchFn
+	originalStageInstaller := stageInstallerFn
+	originalClaimInstallerExecution := claimInstallerExecutionFn
+	originalReconcileUninstall := reconcileWindowsUninstallRegistrationFn
+	originalTerminate := terminateSupersededDesktopsFn
+	t.Cleanup(func() {
+		runInstallerFn = originalInstaller
+		startRelaunchFn = originalRelaunch
+		stageInstallerFn = originalStageInstaller
+		claimInstallerExecutionFn = originalClaimInstallerExecution
+		reconcileWindowsUninstallRegistrationFn = originalReconcileUninstall
+		terminateSupersededDesktopsFn = originalTerminate
+	})
+	stageInstallerFn = func(path, _ string) (string, func() error, error) {
+		return path, func() error { return nil }, nil
+	}
+	claimInstallerExecutionFn = func(string, string) (func(), error) { return func() {}, nil }
+	reconcileWindowsUninstallRegistrationFn = func(string, string) (bool, error) { return true, nil }
+	runInstallerFn = func(_ string, staging string) error {
+		for _, name := range []string{"reasonix-desktop.exe", "reasonix-cli.exe", "reasonix-update-helper.exe", "reasonix-launcher.exe"} {
+			if err := os.WriteFile(filepath.Join(staging, name), []byte("new-"+name), 0o700); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	terminated := false
+	terminateSupersededDesktopsFn = func(root string) int {
+		if root != installDir {
+			t.Fatalf("terminate root = %q", root)
+		}
+		terminated = true
+		return 1
+	}
+	var relaunchPath string
+	startRelaunchFn = func(path, dir string) error {
+		relaunchPath = path
+		if dir != installDir {
+			t.Fatalf("relaunch dir = %q", dir)
+		}
+		return nil
+	}
+
+	if code := run([]string{
+		"--installer", filepath.Join(installDir, "installer.exe"),
+		"--installer-sha256", testInstallerSHA256,
+		"--install-dir", installDir,
+		"--relaunch", oldDesktop,
+		"--to-version", "v1.24.1",
+		"--install-layout", "versioned-v1",
+	}); code != 0 {
+		t.Fatalf("run exit code = %d", code)
+	}
+	if !terminated {
+		t.Fatal("versioned update did not clear superseded desktop processes")
+	}
+	if filepath.Base(relaunchPath) != "reasonix-launcher.exe" {
+		t.Fatalf("relaunch path = %s, want install-root launcher (not %s)", relaunchPath, oldDesktop)
+	}
+	if relaunchPath == oldDesktop {
+		t.Fatal("relaunch used the retained previous desktop")
 	}
 }
 

@@ -1,18 +1,17 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 
 	"reasonix/internal/installlayout"
 	"reasonix/internal/proc"
 )
 
-// relaunchThroughLauncher starts the permanent thin launcher (or falls back to
-// the running executable). A legacy Guard binary is considered only as a
-// one-release migration fallback for flat 1.18-1.19.1 installations.
+// relaunchThroughLauncher starts the permanent thin launcher (or the active
+// desktop). It never restarts a retained versions/<old>/ desktop binary.
 func relaunchThroughLauncher() error {
 	return relaunchThroughLauncherWithEnv(nil)
 }
@@ -22,25 +21,9 @@ func relaunchThroughLauncherWithEnv(overrides map[string]string) error {
 	if err != nil {
 		return err
 	}
-	root := filepath.Dir(exe)
-	if resolved, err := installlayout.ResolveInstallRoot(exe); err == nil && resolved != "" {
-		root = resolved
-	}
-	candidates := []string{
-		filepath.Join(root, "reasonix-launcher"),
-		filepath.Join(root, "Reasonix.exe"),
-		filepath.Join(root, "reasonix-guard"), // migration window only
-	}
-	if runtime.GOOS == "windows" {
-		candidates[0] += ".exe"
-		candidates[2] += ".exe"
-	}
-	launcher := exe
-	for _, path := range candidates {
-		if _, err := os.Stat(path); err == nil {
-			launcher = path
-			break
-		}
+	launcher, err := relaunchTarget(exe)
+	if err != nil {
+		return err
 	}
 	args := []string{}
 	// Only legacy guard understands "launch --detach"; the thin launcher strips it.
@@ -53,6 +36,21 @@ func relaunchThroughLauncherWithEnv(overrides map[string]string) error {
 	}
 	cmd.Stdout, cmd.Stderr, cmd.Stdin = os.Stdout, os.Stderr, os.Stdin
 	return cmd.Start()
+}
+
+func relaunchTarget(exe string) (string, error) {
+	root := filepath.Dir(exe)
+	if resolved, err := installlayout.ResolveInstallRoot(exe); err == nil && resolved != "" {
+		root = resolved
+	}
+	path, err := installlayout.StableRelaunchPath(root)
+	if err != nil {
+		return "", err
+	}
+	if same, err := installlayout.SameRegularFile(path, exe); err == nil && same {
+		return "", fmt.Errorf("stable relaunch path is this process")
+	}
+	return path, nil
 }
 
 func processEnvWithOverrides(base []string, overrides map[string]string) []string {
