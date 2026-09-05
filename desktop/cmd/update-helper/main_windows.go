@@ -38,7 +38,7 @@ var (
 	claimInstallerExecutionFn               = claimVerifiedInstallerForExecution
 	lstatUpdateStagingFn                    = os.Lstat
 	reconcileWindowsUninstallRegistrationFn = winuninstall.Reconcile
-	terminateSupersededDesktopsFn           = terminateSupersededVersionedDesktops
+	verifyDesktopHandoffFn                  = verifyDesktopHandoff
 )
 
 func main() {
@@ -94,6 +94,7 @@ func run(args []string) int {
 	if parentPID != 0 {
 		if err := waitForProcessExitFn(uint32(parentPID), parentExitTimeout); err != nil {
 			logger.Printf("wait for parent process %d: %v", parentPID, err)
+			notifyHandoffBlockedFn(false)
 			return 1
 		}
 	}
@@ -295,20 +296,25 @@ func runVersionedWindowsUpdate(logger *log.Logger, installer, installerSHA256, i
 }
 
 func relaunchPublishedInstall(logger *log.Logger, relaunch, installDir, failVerb string) int {
-	n, err := terminateSupersededDesktopsFn(installDir)
-	if n > 0 {
-		logger.Printf("terminated %d superseded desktop process(es) before relaunch", n)
-	}
-	if err != nil {
-		logger.Printf("wait for superseded desktop processes before relaunch: %v", err)
+	if err := verifyDesktopHandoffFn(installDir, false); err != nil {
+		logger.Printf("installed; restart incomplete: %v", err)
+		notifyHandoffBlockedFn(true)
 		return 1
 	}
 	path := preferRelaunchPath(relaunch, installDir)
 	if path == "" {
-		return 0
+		logger.Print("installed; no stable restart target is available")
+		notifyHandoffBlockedFn(true)
+		return 1
 	}
 	if err := startRelaunchFn(path, installDir); err != nil {
 		logger.Printf("%s: %v", failVerb, err)
+		notifyHandoffBlockedFn(true)
+		return 1
+	}
+	if err := verifyDesktopHandoffFn(installDir, true); err != nil {
+		logger.Printf("installed; restart unconfirmed: %v", err)
+		notifyHandoffBlockedFn(true)
 		return 1
 	}
 	return 0

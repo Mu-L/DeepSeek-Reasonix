@@ -82,6 +82,7 @@ func TestStageVerifiedInstallerRejectsSourceHashDrift(t *testing.T) {
 }
 
 func TestRunRequiresTargetVersionBeforeStartingInstaller(t *testing.T) {
+	stubDesktopHandoff(t)
 	if code := run([]string{
 		"--installer", `C:\Temp\Reasonix-installer.exe`,
 		"--installer-sha256", testInstallerSHA256,
@@ -91,6 +92,7 @@ func TestRunRequiresTargetVersionBeforeStartingInstaller(t *testing.T) {
 }
 
 func TestRunVersionedLayoutDoesNotReadOrClaimLegacyPending(t *testing.T) {
+	stubDesktopHandoff(t)
 	installDir := t.TempDir()
 	seed := t.TempDir()
 	for _, name := range []string{"reasonix-desktop.exe", "reasonix-cli.exe", "reasonix-update-helper.exe"} {
@@ -118,7 +120,7 @@ func TestRunVersionedLayoutDoesNotReadOrClaimLegacyPending(t *testing.T) {
 	originalStageInstaller := stageInstallerFn
 	originalClaimInstallerExecution := claimInstallerExecutionFn
 	originalReconcileUninstall := reconcileWindowsUninstallRegistrationFn
-	originalTerminate := terminateSupersededDesktopsFn
+	originalVerify := verifyDesktopHandoffFn
 	t.Cleanup(func() {
 		runInstallerFn = originalInstaller
 		startRelaunchFn = originalRelaunch
@@ -126,9 +128,9 @@ func TestRunVersionedLayoutDoesNotReadOrClaimLegacyPending(t *testing.T) {
 		stageInstallerFn = originalStageInstaller
 		claimInstallerExecutionFn = originalClaimInstallerExecution
 		reconcileWindowsUninstallRegistrationFn = originalReconcileUninstall
-		terminateSupersededDesktopsFn = originalTerminate
+		verifyDesktopHandoffFn = originalVerify
 	})
-	terminateSupersededDesktopsFn = func(string) (int, error) { return 0, nil }
+	verifyDesktopHandoffFn = func(string, bool) error { return nil }
 	legacyClaimed := false
 	claimPendingFileUpdateFn = func(string, string, string, string, []string, time.Duration) (*repair.UpdateTransaction, func(), error) {
 		legacyClaimed = true
@@ -183,6 +185,7 @@ func TestRunVersionedLayoutDoesNotReadOrClaimLegacyPending(t *testing.T) {
 }
 
 func TestRunVersionedUpdateRelaunchesLauncherNotOldDesktop(t *testing.T) {
+	stubDesktopHandoff(t)
 	installDir := t.TempDir()
 	seed := t.TempDir()
 	for _, name := range []string{"reasonix-desktop.exe", "reasonix-cli.exe", "reasonix-update-helper.exe", "reasonix-launcher.exe"} {
@@ -209,14 +212,14 @@ func TestRunVersionedUpdateRelaunchesLauncherNotOldDesktop(t *testing.T) {
 	originalStageInstaller := stageInstallerFn
 	originalClaimInstallerExecution := claimInstallerExecutionFn
 	originalReconcileUninstall := reconcileWindowsUninstallRegistrationFn
-	originalTerminate := terminateSupersededDesktopsFn
+	originalVerify := verifyDesktopHandoffFn
 	t.Cleanup(func() {
 		runInstallerFn = originalInstaller
 		startRelaunchFn = originalRelaunch
 		stageInstallerFn = originalStageInstaller
 		claimInstallerExecutionFn = originalClaimInstallerExecution
 		reconcileWindowsUninstallRegistrationFn = originalReconcileUninstall
-		terminateSupersededDesktopsFn = originalTerminate
+		verifyDesktopHandoffFn = originalVerify
 	})
 	stageInstallerFn = func(path, _ string) (string, func() error, error) {
 		return path, func() error { return nil }, nil
@@ -231,13 +234,13 @@ func TestRunVersionedUpdateRelaunchesLauncherNotOldDesktop(t *testing.T) {
 		}
 		return nil
 	}
-	terminated := false
-	terminateSupersededDesktopsFn = func(root string) (int, error) {
+	verified := false
+	verifyDesktopHandoffFn = func(root string, _ bool) error {
 		if root != installDir {
-			t.Fatalf("terminate root = %q", root)
+			t.Fatalf("verify root = %q", root)
 		}
-		terminated = true
-		return 1, nil
+		verified = true
+		return nil
 	}
 	var relaunchPath string
 	startRelaunchFn = func(path, dir string) error {
@@ -258,8 +261,8 @@ func TestRunVersionedUpdateRelaunchesLauncherNotOldDesktop(t *testing.T) {
 	}); code != 0 {
 		t.Fatalf("run exit code = %d", code)
 	}
-	if !terminated {
-		t.Fatal("versioned update did not clear superseded desktop processes")
+	if !verified {
+		t.Fatal("versioned update did not verify its desktop owner")
 	}
 	if filepath.Base(relaunchPath) != "reasonix-launcher.exe" {
 		t.Fatalf("relaunch path = %s, want install-root launcher (not %s)", relaunchPath, oldDesktop)
@@ -269,15 +272,16 @@ func TestRunVersionedUpdateRelaunchesLauncherNotOldDesktop(t *testing.T) {
 	}
 }
 
-func TestRelaunchPublishedInstallWaitFailurePreventsRelaunch(t *testing.T) {
-	originalTerminate := terminateSupersededDesktopsFn
+func TestRelaunchPublishedInstallBlockedOwnerPreventsRelaunch(t *testing.T) {
+	stubDesktopHandoff(t)
+	originalVerify := verifyDesktopHandoffFn
 	originalRelaunch := startRelaunchFn
 	t.Cleanup(func() {
-		terminateSupersededDesktopsFn = originalTerminate
+		verifyDesktopHandoffFn = originalVerify
 		startRelaunchFn = originalRelaunch
 	})
-	terminateSupersededDesktopsFn = func(string) (int, error) {
-		return 1, errors.New("process did not exit")
+	verifyDesktopHandoffFn = func(string, bool) error {
+		return errors.New("old instance remains")
 	}
 	relaunched := false
 	startRelaunchFn = func(string, string) error {
@@ -298,6 +302,7 @@ func TestRelaunchPublishedInstallWaitFailurePreventsRelaunch(t *testing.T) {
 }
 
 func TestRunHoldsReleaseUnitLockAcrossInstallerHandoff(t *testing.T) {
+	stubDesktopHandoff(t)
 	t.Setenv("REASONIX_HOME", t.TempDir())
 	installDir := t.TempDir()
 	pending := prepareLegacyWindowsUpdate(t, installDir, "v2")
@@ -383,6 +388,7 @@ func TestRunHoldsReleaseUnitLockAcrossInstallerHandoff(t *testing.T) {
 }
 
 func TestRunDoesNotClaimUpdateBeforeParentExits(t *testing.T) {
+	stubDesktopHandoff(t)
 	installDir := t.TempDir()
 	originalWait := waitForProcessExitFn
 	originalInstaller := runInstallerFn
@@ -425,6 +431,7 @@ func TestRunDoesNotClaimUpdateBeforeParentExits(t *testing.T) {
 }
 
 func TestRunRelaunchesWhenLegacyPendingCannotBeClaimed(t *testing.T) {
+	stubDesktopHandoff(t)
 	installDir := t.TempDir()
 	originalWait := waitForProcessExitFn
 	originalRelaunch := startRelaunchFn
@@ -463,6 +470,7 @@ func TestRunRelaunchesWhenLegacyPendingCannotBeClaimed(t *testing.T) {
 }
 
 func TestRunCancelsTransactionWhenStagedExtractionFails(t *testing.T) {
+	stubDesktopHandoff(t)
 	t.Setenv("REASONIX_HOME", t.TempDir())
 	installDir := t.TempDir()
 	originalWait := waitForProcessExitFn
@@ -514,6 +522,7 @@ func TestRunCancelsTransactionWhenStagedExtractionFails(t *testing.T) {
 }
 
 func TestRunTreatsInstalledReleaseUnitRecordingFailureAsApplyFailure(t *testing.T) {
+	stubDesktopHandoff(t)
 	t.Setenv("REASONIX_HOME", t.TempDir())
 	installDir := t.TempDir()
 	originalWait := waitForProcessExitFn
@@ -582,6 +591,7 @@ func TestRunTreatsInstalledReleaseUnitRecordingFailureAsApplyFailure(t *testing.
 }
 
 func TestRunRelaunchesWhenStagingIdentityCannotBeBound(t *testing.T) {
+	stubDesktopHandoff(t)
 	t.Setenv("REASONIX_HOME", t.TempDir())
 	installDir := t.TempDir()
 	originalWait := waitForProcessExitFn

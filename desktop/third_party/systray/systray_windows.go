@@ -129,9 +129,11 @@ type notifyIconData struct {
 	BalloonIcon                windows.Handle
 }
 
+var shellNotifyIcon = pShellNotifyIcon.Call
+
 func (nid *notifyIconData) add() error {
 	const NIM_ADD = 0x00000000
-	res, _, err := pShellNotifyIcon.Call(
+	res, _, err := shellNotifyIcon(
 		uintptr(NIM_ADD),
 		uintptr(unsafe.Pointer(nid)),
 	)
@@ -143,7 +145,7 @@ func (nid *notifyIconData) add() error {
 
 func (nid *notifyIconData) modify() error {
 	const NIM_MODIFY = 0x00000001
-	res, _, err := pShellNotifyIcon.Call(
+	res, _, err := shellNotifyIcon(
 		uintptr(NIM_MODIFY),
 		uintptr(unsafe.Pointer(nid)),
 	)
@@ -155,7 +157,7 @@ func (nid *notifyIconData) modify() error {
 
 func (nid *notifyIconData) delete() error {
 	const NIM_DELETE = 0x00000002
-	res, _, err := pShellNotifyIcon.Call(
+	res, _, err := shellNotifyIcon(
 		uintptr(NIM_DELETE),
 		uintptr(unsafe.Pointer(nid)),
 	)
@@ -488,6 +490,20 @@ func (t *winTray) initInstance() error {
 	}
 	t.nid.Size = uint32(unsafe.Sizeof(*t.nid))
 
+	return t.addInitialIcon()
+}
+
+// addInitialIcon may fall back only before this process owns any GUID icon.
+// Never delete the rejected GUID: another process may own it.
+func (t *winTray) addInitialIcon() error {
+	err := t.nid.add()
+	if err == nil || !t.useIconGUID {
+		return err
+	}
+	t.useIconGUID = false
+	t.iconGUID = windows.GUID{}
+	t.nid.GuidItem = windows.GUID{}
+	t.nid.Flags &^= 0x20 // NIF_GUID
 	return t.nid.add()
 }
 
