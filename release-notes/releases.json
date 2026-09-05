@@ -94,8 +94,8 @@
             "zh": "可靠的协议恢复"
           },
           "body": {
-            "en": "Recovery is now explicit, bounded, and durable. A shared protocol_recovery action is available from the Desktop button, CLI /recover-context, Serve, and ACP.",
-            "zh": "恢复现在明确、有界且持久。共享的 protocol_recovery 操作可从桌面按钮、CLI /recover-context、Serve 和 ACP 使用。"
+            "en": "Eligible protocol failures now offer a one-time recovery from valid history through the Desktop button, CLI /recover-context, Serve, and ACP. Recovery survives restart and respects cancellation.",
+            "zh": "可恢复的协议错误现在支持通过桌面按钮、CLI /recover-context、Serve 和 ACP 从有效历史恢复一次，重启后保留恢复状态，并遵守取消操作。"
           },
           "refs": [
             9826
@@ -132,8 +132,7 @@
             "zh": "网络、GitHub 和邮件链接现在具有上下文菜单，提供打开/复制操作和紧凑的 GitHub 引用，并支持完整的键盘操作。"
           },
           "refs": [
-            9824,
-            9823
+            9824
           ]
         },
         {
@@ -186,8 +185,7 @@
               "zh": "为网络、GitHub 和邮件链接添加了上下文菜单，包含打开、复制和紧凑引用操作。"
             },
             "refs": [
-              9824,
-              9823
+              9824
             ]
           },
           {
@@ -235,8 +233,8 @@
               "zh": "协议恢复加固"
             },
             "body": {
-              "en": "Recovery is explicit, bounded, and durable, with a shared protocol_recovery action across surfaces.",
-              "zh": "恢复明确、有界且持久，跨界面共享 protocol_recovery 操作。"
+              "en": "Eligible protocol failures now offer a one-time recovery from valid history through the Desktop button, CLI /recover-context, Serve, and ACP. Recovery survives restart and respects cancellation.",
+              "zh": "可恢复的协议错误现在支持通过桌面按钮、CLI /recover-context、Serve 和 ACP 从有效历史恢复一次，重启后保留恢复状态，并遵守取消操作。"
             },
             "refs": [
               9826
@@ -326,8 +324,45 @@
           }
         ]
       },
-      "upgrade": [],
-      "risks": [],
+      "upgrade": [
+        {
+          "level": "info",
+          "targets": [
+            "desktop",
+            "cli"
+          ],
+          "title": {
+            "en": "DeepSeek conversation default",
+            "zh": "DeepSeek 主对话默认协议"
+          },
+          "body": {
+            "en": "Built-in DeepSeek conversations use Chat Completions again while web search runs independently through the official search endpoint. The one-time configuration upgrade preserves model, effort, search preferences and explicit custom routes.",
+            "zh": "内置 DeepSeek 主对话恢复使用 Chat Completions，网络搜索独立使用官方搜索端点。一次性配置升级保留模型、思考等级、搜索偏好和显式自定义路由。"
+          },
+          "refs": [
+            9826
+          ]
+        }
+      ],
+      "risks": [
+        {
+          "targets": [
+            "desktop",
+            "cli"
+          ],
+          "title": {
+            "en": "Recovery and downgrade boundaries",
+            "zh": "恢复与降级边界"
+          },
+          "body": {
+            "en": "A model may request a completed read-only tool again after protocol repair. Verified file-write recovery prevents repeated satisfied writes, but this is not a guarantee for arbitrary shell or MCP effects. Older clients can read ordinary history but cannot enforce the new recovery accounting; do not use a downgrade to resume an unresolved protocol incident.",
+            "zh": "协议修复后，模型可能再次请求已经完成的只读工具。已验证的文件写入恢复可避免重复执行已满足的写入，但不能据此保证任意 shell 或 MCP 副作用不重复。旧客户端可读取普通历史，但无法执行新的恢复约束；请勿通过降级续跑尚未解决的协议故障。"
+          },
+          "refs": [
+            9826
+          ]
+        }
+      ],
       "contributors": [
         "SivanCola",
         "wqshan-cn"
