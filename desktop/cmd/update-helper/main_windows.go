@@ -295,8 +295,13 @@ func runVersionedWindowsUpdate(logger *log.Logger, installer, installerSHA256, i
 }
 
 func relaunchPublishedInstall(logger *log.Logger, relaunch, installDir, failVerb string) int {
-	if n := terminateSupersededDesktopsFn(installDir); n > 0 {
+	n, err := terminateSupersededDesktopsFn(installDir)
+	if n > 0 {
 		logger.Printf("terminated %d superseded desktop process(es) before relaunch", n)
+	}
+	if err != nil {
+		logger.Printf("wait for superseded desktop processes before relaunch: %v", err)
+		return 1
 	}
 	path := preferRelaunchPath(relaunch, installDir)
 	if path == "" {

@@ -195,7 +195,9 @@ console.log("\nbundle budgets");
 // read-only provider badges add a measured 0.2 KiB including gzip/toolchain
 // rounding; keep this narrow ratchet
 // explicit rather than restoring manual capability controls.
-const initialJSBudgetKiB = 464.1;
+// Foreground and hourly update refresh scheduling brings the measured path to
+// 464.237 KiB. Retain only the next one-decimal ceiling.
+const initialJSBudgetKiB = 464.3;
 assertBudget("initial JavaScript gzip", initialJSGzip, initialJSBudgetKiB * 1024);
 assertBudget("largest initial JavaScript chunk gzip", largestInitialJS, 280 * 1024);
 // Render-blocking CSS is intentionally absent: styles.css loads deferred via
@@ -359,6 +361,8 @@ const rawInitialBytes = [...initialJS, ...initialCSS, ...appShellCSS]
 // On the current main-v2 base, the combined measured path is 2474.6 KiB;
 // the model-capability helper and localized status copy add 0.9 KiB; retain
 // the smallest bounded cross-platform ceiling.
-const rawInitialBudgetKiB = 2_475.7;
+// Foreground and hourly update refresh scheduling measures 2476.113 KiB raw;
+// retain only the next one-decimal ceiling.
+const rawInitialBudgetKiB = 2_476.2;
 assertBudget("initial raw JavaScript and CSS", rawInitialBytes, rawInitialBudgetKiB * 1024);
 assertBudget("largest initial JavaScript chunk raw", largestInitialJSRaw, 1_000 * 1024);

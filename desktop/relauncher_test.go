@@ -56,6 +56,34 @@ func TestRelaunchTargetUsesLauncherInsteadOfRetainedDesktop(t *testing.T) {
 	}
 }
 
+func TestRelaunchTargetAllowsCurrentDesktopFallback(t *testing.T) {
+	for _, versioned := range []bool{false, true} {
+		name := "flat"
+		if versioned {
+			name = "versioned"
+		}
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			exe := filepath.Join(root, installlayout.DesktopBinaryName())
+			if versioned {
+				exe = seedDesktopVersionedLayout(t, root, "v1.24.1", "active")
+				if err := os.Remove(filepath.Join(root, installlayout.LauncherBinaryName())); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.WriteFile(exe, []byte("desktop"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			got, err := relaunchTarget(exe)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != exe {
+				t.Fatalf("relaunchTarget = %s, want current desktop %s", got, exe)
+			}
+		})
+	}
+}
+
 func TestSupersededDesktopNeedsRelaunch(t *testing.T) {
 	root := t.TempDir()
 	oldDesktop := seedDesktopVersionedLayout(t, root, "v1.24.0", "old")

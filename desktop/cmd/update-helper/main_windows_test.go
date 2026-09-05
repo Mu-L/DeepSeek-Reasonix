@@ -6,6 +6,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -126,7 +128,7 @@ func TestRunVersionedLayoutDoesNotReadOrClaimLegacyPending(t *testing.T) {
 		reconcileWindowsUninstallRegistrationFn = originalReconcileUninstall
 		terminateSupersededDesktopsFn = originalTerminate
 	})
-	terminateSupersededDesktopsFn = func(string) int { return 0 }
+	terminateSupersededDesktopsFn = func(string) (int, error) { return 0, nil }
 	legacyClaimed := false
 	claimPendingFileUpdateFn = func(string, string, string, string, []string, time.Duration) (*repair.UpdateTransaction, func(), error) {
 		legacyClaimed = true
@@ -230,12 +232,12 @@ func TestRunVersionedUpdateRelaunchesLauncherNotOldDesktop(t *testing.T) {
 		return nil
 	}
 	terminated := false
-	terminateSupersededDesktopsFn = func(root string) int {
+	terminateSupersededDesktopsFn = func(root string) (int, error) {
 		if root != installDir {
 			t.Fatalf("terminate root = %q", root)
 		}
 		terminated = true
-		return 1
+		return 1, nil
 	}
 	var relaunchPath string
 	startRelaunchFn = func(path, dir string) error {
@@ -264,6 +266,34 @@ func TestRunVersionedUpdateRelaunchesLauncherNotOldDesktop(t *testing.T) {
 	}
 	if relaunchPath == oldDesktop {
 		t.Fatal("relaunch used the retained previous desktop")
+	}
+}
+
+func TestRelaunchPublishedInstallWaitFailurePreventsRelaunch(t *testing.T) {
+	originalTerminate := terminateSupersededDesktopsFn
+	originalRelaunch := startRelaunchFn
+	t.Cleanup(func() {
+		terminateSupersededDesktopsFn = originalTerminate
+		startRelaunchFn = originalRelaunch
+	})
+	terminateSupersededDesktopsFn = func(string) (int, error) {
+		return 1, errors.New("process did not exit")
+	}
+	relaunched := false
+	startRelaunchFn = func(string, string) error {
+		relaunched = true
+		return nil
+	}
+	if code := relaunchPublishedInstall(
+		log.New(io.Discard, "", 0),
+		filepath.Join(t.TempDir(), "reasonix-desktop.exe"),
+		t.TempDir(),
+		"relaunch",
+	); code != 1 {
+		t.Fatalf("relaunchPublishedInstall = %d, want 1", code)
+	}
+	if relaunched {
+		t.Fatal("relaunch started before the superseded desktop exit was confirmed")
 	}
 }
 

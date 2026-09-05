@@ -100,3 +100,6 @@ replace reasonix => ../
 // Reasonix patches WebView2 monitor-scale detection for mixed-DPI restore
 // (#5862) and isolates its embedded/loopback UI from stale system proxies.
 replace github.com/wailsapp/go-webview2 => ./third_party/go-webview2
+
+// Reasonix keeps one signed Windows tray identity across versioned desktop paths.
+replace fyne.io/systray => ./third_party/systray

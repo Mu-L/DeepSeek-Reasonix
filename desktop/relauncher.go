@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -46,9 +45,6 @@ func relaunchTarget(exe string) (string, error) {
 	path, err := installlayout.StableRelaunchPath(root)
 	if err != nil {
 		return "", err
-	}
-	if same, err := installlayout.SameRegularFile(path, exe); err == nil && same {
-		return "", fmt.Errorf("stable relaunch path is this process")
 	}
 	return path, nil
 }
